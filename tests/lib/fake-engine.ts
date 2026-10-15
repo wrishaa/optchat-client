@@ -119,6 +119,9 @@ Deno.serve({ hostname: "127.0.0.1", port, onListen: () => console.log(`fake engi
       if (m.type === "connect") { subsOf.get(socket)?.add(ws); send({ type: "hello", ws, version: "fake", build: "fake", running: true }); }
       send(snapshot(ws, m.task ?? 0));
     } else if (m.type === "disconnect") send({ type: "disconnected", ws });
+    // like the engine (lib/machine.ts): a workspace this socket doesn't follow is refused at once, with the id (the
+    // client's lan-first ping is such a message)
+    else if (!list.some((w) => w.name === ws)) send({ type: "error", ws, message: `not connected to ${ws}`, ...(m.id !== undefined ? { id: m.id } : {}) });
     else if (m.type === "rpc") send({ type: "rpc", ws, id: m.id, result: m.method === "notices" ? notices(ws).map((n) => ({ ...n, readAt: read.has(n.id) ? now : null })) : m.method === "log.range" ? (logs[m.params?.task ?? 0] ?? []).filter((e) => e.i >= (m.params?.from ?? 0) && e.i < (m.params?.to ?? 1e9)) : [] });
     else if (m.type === "notices.read") {
       for (const n of notices(ws)) if (m.all || (m.ids ?? []).includes(n.id) || n.level === m.level) read.add(n.id);

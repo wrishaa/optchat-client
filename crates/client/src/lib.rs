@@ -1,6 +1,7 @@
 //! OptChat's engine client, shared by the macOS and iOS apps: connections and the app state (no views).
 #![recursion_limit = "256"]
 pub mod client;
+pub mod lan;
 pub mod media;
 pub mod mic;
 pub mod state;

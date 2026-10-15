@@ -10,10 +10,11 @@ use optchat_proto::rates::Per1M;
 use optchat_proto::types::*;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use crate::lan::{self, PathKind};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
@@ -76,7 +77,11 @@ pub async fn pick_url(urls: &[String], token: &str) -> Result<String, String> {
             Err(e) => last = format!("{u}: {e}"),
         }
     }
-    if let Some(local) = ok.iter().find(|u| crate::tokens::is_local(u)) {
+    // OPTCHAT_NO_LOCAL_URL=1 (tests, lan-first measurements): the tunnel even when this Mac's own address answers
+    let no_local = std::env::var("OPTCHAT_NO_LOCAL_URL").is_ok_and(|v| v == "1");
+    if no_local {
+        ok.retain(|u| !crate::tokens::is_local(u));
+    } else if let Some(local) = ok.iter().find(|u| crate::tokens::is_local(u)) {
         return Ok(local.clone());
     }
     ok.into_iter().next().ok_or_else(|| format!("no address of the engine answers ({last})"))
@@ -121,6 +126,39 @@ pub struct Blob {
 
 type RpcReply = oneshot::Sender<Result<Value, String>>;
 type ControlReply = oneshot::Sender<(bool, String, Option<i64>)>;
+type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// One engine socket (lan-first: up to three at once while switching: the primary, a candidate, a draining one).
+struct Sock {
+    gen: u64,
+    tx: mpsc::UnboundedSender<WsMsg>,
+    role: Role,
+}
+enum Role {
+    /// opened next to the primary: its messages wait here until every workspace has its snapshot, then it takes over
+    Candidate { buf: Vec<String>, need: HashSet<String>, ready: Option<oneshot::Sender<()>> },
+    /// the socket the app uses
+    Primary,
+    /// replaced: only answers to requests still in flight are taken from it, then it closes
+    Draining,
+}
+enum Ctl {
+    /// the primary socket closed
+    Lost(PathKind),
+    /// the lan socket missed a heartbeat
+    HbMiss(u64),
+    /// re-evaluate the path now (tests, lan on/off)
+    Kick,
+}
+
+/// what the lan-first test hooks count (OPTCHAT_LAN_PINGER): every ping id should be answered exactly once
+#[derive(Default, Debug)]
+pub struct PingStats {
+    pub sent: u64,
+    pub answered: u64,
+    pub dup: u64,
+    answered_ids: HashSet<u64>,
+}
 
 /// One socket to an engine (`/engine/ws`) with one client token; it carries every workspace of that token the app is
 /// connected to (`connect {ws}` / `disconnect {ws}`; `ws` on every message). Reconnects with backoff and connects
@@ -140,11 +178,39 @@ pub struct EngineConn {
     pub online: AtomicBool,
     pub reconnects: AtomicU64,
     http: reqwest::Client,
+    // ---- lan-first ----
+    socks: Mutex<Vec<Sock>>,
+    gens: AtomicU64,
+    ctl: mpsc::UnboundedSender<Ctl>,
+    ctl_rx: Mutex<Option<mpsc::UnboundedReceiver<Ctl>>>,
+    /// the primary socket's path, and the last heartbeat round trip on it (ms)
+    path: Mutex<Option<PathKind>>,
+    rtt_ms: Mutex<Option<f64>>,
+    lan_http: Mutex<Option<Arc<lan::LanHttp>>>,
+    ticket: Mutex<Option<lan::Ticket>>,
+    /// trust on first use (poc): the first pin seen per engine; a later advert with another pin is ignored
+    pins: Mutex<HashMap<String, String>>,
+    pub lan_disabled: AtomicBool,
+    pings: Mutex<HashMap<u64, oneshot::Sender<()>>>,
+    pub ping_stats: Mutex<PingStats>,
 }
 
 impl EngineConn {
     pub fn start(cfg: EngineCfg, socket_token: Option<String>, events: mpsc::UnboundedSender<Routed>) -> Arc<EngineConn> {
+        let (ctl, ctl_rx) = mpsc::unbounded_channel();
         let c = Arc::new(EngineConn {
+            socks: Mutex::new(vec![]),
+            gens: AtomicU64::new(1),
+            ctl,
+            ctl_rx: Mutex::new(Some(ctl_rx)),
+            path: Mutex::new(None),
+            rtt_ms: Mutex::new(None),
+            lan_http: Mutex::new(None),
+            ticket: Mutex::new(None),
+            pins: Mutex::new(HashMap::new()),
+            lan_disabled: AtomicBool::new(false),
+            pings: Mutex::new(HashMap::new()),
+            ping_stats: Mutex::new(PingStats::default()),
             socket_token,
             cfg,
             events,
@@ -160,6 +226,17 @@ impl EngineConn {
         });
         let me = c.clone();
         tokio::spawn(async move { me.run().await });
+        // lan-first test hooks (env; never set in a normal launch)
+        if c.socket_token.is_some() {
+            if let Some(n) = std::env::var("OPTCHAT_LAN_BENCH").ok().and_then(|v| v.parse::<usize>().ok()) {
+                let me = c.clone();
+                tokio::spawn(async move { me.bench(n).await });
+            }
+            if let Some(ms) = std::env::var("OPTCHAT_LAN_PINGER").ok().and_then(|v| v.parse::<u64>().ok()) {
+                let me = c.clone();
+                tokio::spawn(async move { me.pinger(ms).await });
+            }
+        }
         c
     }
     fn emit(&self, ws: Option<&str>, e: HubEvent) {
@@ -172,69 +249,523 @@ impl EngineConn {
         }
     }
 
+    // ---- the socket(s): lan-first path manager --------------------------------------------------------------------
+    /// Keeps the engine socket on the best path (lan.rs `Sm`): the tunnel (cfg.endpoint) as the baseline, a lan front
+    /// of this engine when bonjour finds one on the local network. Switches make-before-break; a dead lan socket or
+    /// a heartbeat miss goes back to the tunnel at once; a dead tunnel reconnects with backoff (0.4 s doubling to 4 s)
+    /// and resnapshots, as before.
     async fn run(self: Arc<Self>) {
-        let mut retry: u32 = 0;
+        let Some(mut ctl_rx) = self.ctl_rx.lock().take() else { return };
+        // lan only for engines added with a token (the token mints the lan ticket) that have a public address
+        let mut world = if self.socket_token.is_some() { lan::world() } else { None };
+        let mut epoch = world.as_ref().map(|w| w.borrow().net_epoch).unwrap_or(0);
+        let mut sm = lan::Sm::default();
+        if let Some(s) = std::env::var("OPTCHAT_LAN_RETRY_S").ok().and_then(|v| v.parse().ok()) {
+            sm.lan_retry = Duration::from_secs(s);
+        }
         let mut first = true;
         while !self.stopped.load(Ordering::SeqCst) {
-            self.emit_all(|| HubEvent::Conn(Conn::Connecting));
-            match self.connect_with(&format!("{}/engine/ws", self.cfg.ws_base()), self.socket_token.as_deref()).await {
-                Ok(ws) => {
-                    retry = 0;
-                    if !first {
-                        self.reconnects.fetch_add(1, Ordering::SeqCst);
-                    }
-                    first = false;
-                    self.online.store(true, Ordering::SeqCst);
-                    self.emit(None, HubEvent::EngineOnline(true));
-                    self.emit(None, HubEvent::EngineError(String::new()));
-                    let (mut w, mut r) = ws.split();
-                    let (tx, mut rx) = mpsc::unbounded_channel::<WsMsg>();
-                    // every connected workspace again: each answers hello + snapshot
-                    for (ws, (task, token)) in self.subs.lock().iter() {
-                        let _ = tx.send(WsMsg::text(json!({ "type": "connect", "ws": ws, "task": task, "token": token }).to_string()));
-                    }
-                    *self.out.lock() = Some(tx);
-                    let writer = tokio::spawn(async move {
-                        while let Some(m) = rx.recv().await {
-                            if w.send(m).await.is_err() {
-                                break;
-                            }
-                        }
-                        let _ = w.close().await;
-                    });
-                    while let Some(msg) = r.next().await {
-                        match msg {
-                            Ok(WsMsg::Text(t)) => self.on_message(t.as_str()),
-                            Ok(WsMsg::Close(_)) | Err(_) => break,
-                            _ => {}
-                        }
-                    }
-                    *self.out.lock() = None;
-                    writer.abort();
-                    for (_, tx) in self.rpcs.lock().drain() {
-                        let _ = tx.send(Err("disconnected from the engine".into()));
-                    }
-                    for (_, tx) in self.controls.lock().drain() {
-                        let _ = tx.send((false, "disconnected from the engine".into(), None));
-                    }
-                    self.online.store(false, Ordering::SeqCst);
-                    self.emit(None, HubEvent::EngineOnline(false));
-                    self.emit_all(|| HubEvent::Conn(Conn::Closed));
+            sm.lan_disabled = self.lan_disabled.load(Ordering::SeqCst);
+            let (env, svc) = self.lan_pick(world.as_ref());
+            // re-probe at least every 30 s, and when a lan backoff ends
+            let mut wait = sm.retry_in(Instant::now()).map(|d| d + Duration::from_millis(5)).unwrap_or(Duration::from_secs(30)).min(Duration::from_secs(30));
+            if let lan::Step::Go(p) = sm.step(Instant::now(), env) {
+                let from = sm.primary;
+                if from.is_none() {
+                    self.emit_all(|| HubEvent::Conn(Conn::Connecting));
                 }
-                Err(e) => {
-                    self.online.store(false, Ordering::SeqCst);
-                    self.emit(None, HubEvent::EngineOnline(false));
-                    self.emit_all(|| HubEvent::Conn(Conn::Closed));
-                    self.emit(None, HubEvent::EngineError(e));
+                let t0 = Instant::now();
+                match self.open_path(p, svc).await {
+                    Ok(how) => {
+                        sm.adopted(p);
+                        if from.is_none() && !first {
+                            self.reconnects.fetch_add(1, Ordering::SeqCst);
+                        }
+                        first = false;
+                        lan::log(&format!("{} {} -> {} in {:.0} ms ({how})", self.cfg.name, from.map(|f| f.name()).unwrap_or("none"), p.name(), t0.elapsed().as_secs_f64() * 1000.0));
+                        continue;
+                    }
+                    Err(e) => {
+                        wait = sm.failed(p, Instant::now());
+                        lan::log(&format!("{} {} failed after {:.0} ms: {e}", self.cfg.name, p.name(), t0.elapsed().as_secs_f64() * 1000.0));
+                        if sm.primary.is_none() && p == PathKind::Tunnel {
+                            self.online.store(false, Ordering::SeqCst);
+                            self.emit(None, HubEvent::EngineOnline(false));
+                            self.emit_all(|| HubEvent::Conn(Conn::Closed));
+                            self.emit(None, HubEvent::EngineError(e));
+                        }
+                        if wait.is_zero() {
+                            continue;
+                        }
+                    }
                 }
             }
+            // wait for a socket event, a network / bonjour change, or the next re-probe
+            tokio::select! {
+                c = ctl_rx.recv() => match c {
+                    Some(Ctl::Lost(p)) => {
+                        let w = sm.lost(p, Instant::now());
+                        if !w.is_zero() && !self.stopped.load(Ordering::SeqCst) {
+                            tokio::time::sleep(w).await;
+                        }
+                    }
+                    Some(Ctl::HbMiss(gen)) => {
+                        if self.is_primary(gen) {
+                            sm.failed(PathKind::Lan, Instant::now());
+                        }
+                    }
+                    Some(Ctl::Kick) => {}
+                    None => break,
+                },
+                _ = async { match world.as_mut() { Some(w) => { let _ = w.changed().await; } None => std::future::pending::<()>().await } } => {
+                    let e = world.as_ref().map(|w| w.borrow().net_epoch).unwrap_or(0);
+                    if e != epoch {
+                        epoch = e;
+                        sm.net_changed();
+                    }
+                }
+                _ = tokio::time::sleep(wait) => {}
+            }
+        }
+        for s in self.socks.lock().drain(..) {
+            let _ = s.tx.send(WsMsg::Close(None));
+        }
+    }
+
+    /// the lan front for this engine, if one is advertised on this network (and the network is local)
+    fn lan_pick(&self, world: Option<&tokio::sync::watch::Receiver<lan::World>>) -> (lan::Env, Option<lan::LanService>) {
+        let Some(w) = world else { return (lan::Env::default(), None) };
+        let w = w.borrow();
+        let mut urls = self.cfg.urls.clone();
+        urls.push(self.cfg.endpoint.clone());
+        let svc = w.services.iter().find(|s| s.serves(&urls) && self.pin_trusted(s)).cloned();
+        (lan::Env { lan_seen: svc.is_some(), net_local: w.net.local() }, svc)
+    }
+    fn pin_trusted(&self, s: &lan::LanService) -> bool {
+        let mut pins = self.pins.lock();
+        match pins.get(&s.engine) {
+            Some(p) if p != &s.pin => false,
+            Some(_) => true,
+            None => {
+                pins.insert(s.engine.clone(), s.pin.clone());
+                true
+            }
+        }
+    }
+    fn is_primary(&self, gen: u64) -> bool {
+        self.socks.lock().iter().any(|s| s.gen == gen && matches!(s.role, Role::Primary))
+    }
+    /// the path the engine socket is on now ("lan" / "tunnel"), for the status bar and tests
+    pub fn path(&self) -> Option<PathKind> {
+        *self.path.lock()
+    }
+    pub fn path_label(&self) -> String {
+        match (self.path(), *self.rtt_ms.lock()) {
+            (Some(p), Some(ms)) => format!("{} {:.0} ms", p.name(), ms),
+            (Some(p), None) => p.name().to_string(),
+            _ => String::new(),
+        }
+    }
+    /// tests / a user switch: keep the socket off the lan (it moves to the tunnel make-before-break)
+    pub fn set_lan_disabled(&self, off: bool) {
+        self.lan_disabled.store(off, Ordering::SeqCst);
+        let _ = self.ctl.send(Ctl::Kick);
+    }
+
+    /// Open a socket on `p`. With no socket up it becomes the primary at once (as before lan-first). Next to a
+    /// primary it's a candidate: every workspace is connected on it, and once each has its snapshot it takes over;
+    /// the old one drains for 5 s (answers to requests in flight), then closes.
+    async fn open_path(self: &Arc<Self>, p: PathKind, svc: Option<lan::LanService>) -> Result<String, String> {
+        let t0 = Instant::now();
+        let ws = match p {
+            PathKind::Tunnel => self.connect_with(&format!("{}/engine/ws", self.cfg.ws_base()), self.socket_token.as_deref()).await?,
+            PathKind::Lan => self.dial_lan_ws(svc.ok_or("no lan front")?).await?,
+        };
+        let dial_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let gen = self.gens.fetch_add(1, Ordering::SeqCst);
+        let (mut w, r) = ws.split();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsMsg>();
+        tokio::spawn(async move {
+            while let Some(m) = rx.recv().await {
+                if w.send(m).await.is_err() {
+                    break;
+                }
+            }
+            let _ = w.close().await;
+        });
+        let subs: Vec<(String, i64, String)> = self.subs.lock().iter().map(|(w, (t, k))| (w.clone(), *t, k.clone())).collect();
+        let (rtx, rrx) = oneshot::channel();
+        let switching = {
+            let mut socks = self.socks.lock();
+            let switching = socks.iter().any(|s| matches!(s.role, Role::Primary));
+            let role = if switching { Role::Candidate { buf: vec![], need: subs.iter().map(|s| s.0.clone()).collect(), ready: Some(rtx) } } else { Role::Primary };
+            if !switching {
+                *self.out.lock() = Some(tx.clone());
+            }
+            socks.push(Sock { gen, tx: tx.clone(), role });
+            switching
+        };
+        if !switching {
+            self.online.store(true, Ordering::SeqCst);
+            self.emit(None, HubEvent::EngineOnline(true));
+            self.emit(None, HubEvent::EngineError(String::new()));
+        }
+        // every connected workspace on the new socket: each answers hello + snapshot
+        for (ws, task, token) in &subs {
+            let _ = tx.send(WsMsg::text(json!({ "type": "connect", "ws": ws, "task": task, "token": token }).to_string()));
+        }
+        let pong = Arc::new(tokio::sync::Notify::new());
+        let me = self.clone();
+        let pg = pong.clone();
+        tokio::spawn(async move { me.reader(gen, p, r, pg).await });
+        let me = self.clone();
+        let htx = tx.clone();
+        tokio::spawn(async move { me.heartbeat(gen, p, htx, pong).await });
+        let mut ready_ms = 0.0;
+        if switching {
+            if !subs.is_empty() {
+                let ok = matches!(tokio::time::timeout(Duration::from_secs(8), rrx).await, Ok(Ok(())));
+                if !ok {
+                    self.socks.lock().retain(|s| s.gen != gen);
+                    let _ = tx.send(WsMsg::Close(None));
+                    return Err("no snapshots on the new socket".into());
+                }
+            }
+            ready_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            self.promote(gen, &subs);
+        }
+        *self.path.lock() = Some(p);
+        *self.rtt_ms.lock() = None;
+        // the status bar shows the path: a refresh
+        self.emit(None, HubEvent::EngineOnline(true));
+        Ok(if switching { format!("dial {dial_ms:.0} ms, snapshots {ready_ms:.0} ms, make-before-break") } else { format!("dial {dial_ms:.0} ms") })
+    }
+
+    /// the candidate `gen` takes over: its buffered messages (hello + snapshots and what followed) go to the app in
+    /// order, the old primary drains
+    fn promote(self: &Arc<Self>, gen: u64, sent: &[(String, i64, String)]) {
+        let mut old: Vec<mpsc::UnboundedSender<WsMsg>> = vec![];
+        {
+            let mut socks = self.socks.lock();
+            for s in socks.iter_mut() {
+                if matches!(s.role, Role::Primary) {
+                    s.role = Role::Draining;
+                    old.push(s.tx.clone());
+                }
+            }
+            let Some(s) = socks.iter_mut().find(|s| s.gen == gen) else { return };
+            let buf = match std::mem::replace(&mut s.role, Role::Primary) {
+                Role::Candidate { buf, .. } => buf,
+                _ => vec![],
+            };
+            *self.out.lock() = Some(s.tx.clone());
+            // under the lock: the reader can't deliver a newer message before these
+            for m in buf {
+                self.on_message(&m);
+            }
+        }
+        // a workspace connected (or a task opened) while switching: connect it again on the new socket
+        let now: Vec<(String, i64, String)> = self.subs.lock().iter().map(|(w, (t, k))| (w.clone(), *t, k.clone())).collect();
+        for (ws, task, token) in now {
+            if !sent.iter().any(|(w, t, _)| *w == ws && *t == task) {
+                let _ = self.send_json(json!({ "type": "connect", "ws": ws, "task": task, "token": token }));
+            }
+        }
+        for o in old {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let _ = o.send(WsMsg::Close(None));
+            });
+        }
+    }
+
+    async fn reader(self: Arc<Self>, gen: u64, p: PathKind, mut r: futures_util::stream::SplitStream<Ws>, pong: Arc<tokio::sync::Notify>) {
+        while let Some(msg) = r.next().await {
+            match msg {
+                Ok(WsMsg::Text(t)) => self.dispatch(gen, t.as_str()),
+                Ok(WsMsg::Pong(_)) => pong.notify_one(),
+                Ok(WsMsg::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+        let role = {
+            let mut socks = self.socks.lock();
+            let i = socks.iter().position(|s| s.gen == gen);
+            i.map(|i| socks.remove(i).role)
+        };
+        if matches!(role, Some(Role::Primary)) {
+            *self.out.lock() = None;
+            *self.path.lock() = None;
+            for (_, tx) in self.rpcs.lock().drain() {
+                let _ = tx.send(Err("disconnected from the engine".into()));
+            }
+            for (_, tx) in self.controls.lock().drain() {
+                let _ = tx.send((false, "disconnected from the engine".into(), None));
+            }
+            self.online.store(false, Ordering::SeqCst);
+            self.emit(None, HubEvent::EngineOnline(false));
+            self.emit_all(|| HubEvent::Conn(Conn::Closed));
+            lan::log(&format!("{} {} socket closed", self.cfg.name, p.name()));
+            let _ = self.ctl.send(Ctl::Lost(p));
+        }
+    }
+
+    /// a message from socket `gen`, by its role
+    fn dispatch(&self, gen: u64, text: &str) {
+        let mut socks = self.socks.lock();
+        let Some(s) = socks.iter_mut().find(|s| s.gen == gen) else { return };
+        match &mut s.role {
+            Role::Primary => {
+                drop(socks);
+                self.on_message(text);
+            }
+            Role::Candidate { buf, need, ready } => {
+                buf.push(text.to_string());
+                if let Ok(m) = serde_json::from_str::<Value>(text) {
+                    let ws = m["ws"].as_str().unwrap_or("");
+                    let done = match m["type"].as_str() {
+                        Some("snapshot") | Some("disabled") => true,
+                        Some("error") => m.get("id").is_none(),
+                        _ => false,
+                    };
+                    if done {
+                        need.remove(ws);
+                    }
+                }
+                if need.is_empty() {
+                    if let Some(r) = ready.take() {
+                        let _ = r.send(());
+                    }
+                }
+            }
+            Role::Draining => {
+                drop(socks);
+                // only answers to what was asked on it
+                if let Ok(m) = serde_json::from_str::<Value>(text) {
+                    if m.get("id").is_some() && matches!(m["type"].as_str(), Some("rpc") | Some("controlDone") | Some("error")) {
+                        self.on_message(text);
+                    }
+                }
+            }
+        }
+    }
+
+    /// websocket ping frames (PROTOCOL §6: lan every 10 s, 3 s deadline; the lan front answers them itself, so a miss
+    /// means the lan hop is gone). The tunnel is pinged too (15 s), only to show its round trip.
+    async fn heartbeat(self: Arc<Self>, gen: u64, p: PathKind, tx: mpsc::UnboundedSender<WsMsg>, pong: Arc<tokio::sync::Notify>) {
+        let every = std::env::var("OPTCHAT_LAN_HB_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(Duration::from_secs(if p == PathKind::Lan { 10 } else { 15 }));
+        let deadline = Duration::from_secs(3);
+        let mut first = true;
+        loop {
+            // the first one soon, so the label shows a round trip
+            tokio::time::sleep(if first { Duration::from_millis(500) } else { every }).await;
+            first = false;
+            if !self.socks.lock().iter().any(|s| s.gen == gen) {
+                return;
+            }
+            if !self.is_primary(gen) {
+                continue; // a candidate or a draining socket: only the primary's health matters
+            }
+            let n = pong.notified();
+            tokio::pin!(n);
+            n.as_mut().enable();
+            let t = Instant::now();
+            if tx.send(WsMsg::Ping(Vec::new().into())).is_err() {
+                return;
+            }
+            match tokio::time::timeout(deadline, n).await {
+                Ok(()) => {
+                    if self.is_primary(gen) {
+                        *self.rtt_ms.lock() = Some(t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
+                Err(_) => {
+                    lan::log(&format!("{} heartbeat missed on {} ({} ms deadline)", self.cfg.name, p.name(), deadline.as_millis()));
+                    if p == PathKind::Lan {
+                        let _ = self.ctl.send(Ctl::HbMiss(gen));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- lan: tickets, the pinned socket, pinned GETs ----------------------------------------------------------------
+    fn lan_http_for(&self, svc: &lan::LanService) -> Arc<lan::LanHttp> {
+        let mut g = self.lan_http.lock();
+        match g.as_ref() {
+            Some(h) if h.svc == *svc => h.clone(),
+            _ => {
+                let h = Arc::new(lan::LanHttp::new(svc.clone()));
+                *g = Some(h.clone());
+                h
+            }
+        }
+    }
+    /// a ticket good for opening something now (minted with the engine token over the pinned connection)
+    async fn lan_ticket(&self, http: &lan::LanHttp, fresh: bool) -> Result<String, String> {
+        let now = Instant::now();
+        if !fresh {
+            if let Some(t) = self.ticket.lock().as_ref().filter(|t| t.usable(now) && !t.renew_due(now)) {
+                return Ok(t.value.clone());
+            }
+        }
+        let tok = self.socket_token.clone().ok_or("no engine token")?;
+        let t0 = Instant::now();
+        let t = http.mint(&tok).await?;
+        lan::log(&format!("ticket minted in {:.0} ms (ttl {} s)", t0.elapsed().as_secs_f64() * 1000.0, t.ttl.as_secs()));
+        let v = t.value.clone();
+        *self.ticket.lock() = Some(t);
+        Ok(v)
+    }
+    async fn dial_lan_ws(&self, svc: lan::LanService) -> Result<Ws, String> {
+        let http = self.lan_http_for(&svc);
+        let mut fresh = false;
+        loop {
+            let ticket = self.lan_ticket(&http, fresh).await?;
+            let tls = lan::dial(&svc, Duration::from_millis(1500)).await?;
+            let mut req = format!("wss://{}:{}/engine/ws", lan::SNI, svc.port).into_client_request().map_err(|e| e.to_string())?;
+            req.headers_mut().insert("Authorization", format!("Bearer {ticket}").parse().map_err(|_| "bad ticket".to_string())?);
+            let r = tokio::time::timeout(Duration::from_secs(5), tokio_tungstenite::client_async(req, tokio_tungstenite::MaybeTlsStream::NativeTls(tls))).await.map_err(|_| "timed out".to_string())?;
+            match r {
+                Ok((ws, _)) => return Ok(ws),
+                Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status().as_u16() == 401 && !fresh => {
+                    // ticket_expired / ticket_invalid (the front restarted): mint again, once
+                    fresh = true;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+    /// GET over the pinned lan connection with a ticket (blobs, workspace lists, measurements)
+    pub async fn lan_get(&self, path: &str) -> Result<lan::Resp, String> {
+        let http = self.lan_http.lock().clone().ok_or("no lan front")?;
+        let ticket = self.lan_ticket(&http, false).await?;
+        let r = http.request("GET", path, Some(&ticket)).await?;
+        if r.status == 401 && r.lan_code.as_deref().is_some_and(|c| c.starts_with("ticket_")) {
+            let ticket = self.lan_ticket(&http, true).await?;
+            return http.request("GET", path, Some(&ticket)).await;
+        }
+        Ok(r)
+    }
+
+    /// one round trip to the engine over the current socket: a message it answers at once (an error for a
+    /// workspace nobody connects to; the engine has no ping message yet, PROTOCOL §8)
+    pub async fn ping(&self) -> Result<f64, String> {
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pings.lock().insert(id, tx);
+        self.ping_stats.lock().sent += 1;
+        let t = Instant::now();
+        if let Err(e) = self.send_json(json!({ "type": "ping", "id": id, "ws": "__lanprobe__" })) {
+            self.pings.lock().remove(&id);
+            return Err(e);
+        }
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+            Ok(Ok(())) => Ok(t.elapsed().as_secs_f64() * 1000.0),
+            _ => {
+                self.pings.lock().remove(&id);
+                Err("no answer".into())
+            }
+        }
+    }
+
+    // ---- lan-first measurements (test hooks) -------------------------------------------------------------------------
+    async fn wait_path(&self, p: PathKind, within: Duration) -> Option<f64> {
+        let t = Instant::now();
+        while t.elapsed() < within {
+            if self.path() == Some(p) {
+                return Some(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        None
+    }
+    async fn sample(&self, n: usize, p: PathKind) -> (Vec<f64>, Vec<f64>) {
+        let mut ws = vec![];
+        let mut get = vec![];
+        for _ in 0..n {
+            if let Ok(ms) = self.ping().await {
+                ws.push(ms);
+            }
+        }
+        for _ in 0..n {
+            let t = Instant::now();
+            let ok = match p {
+                PathKind::Lan => self.lan_get("/engine/workspaces").await.map(|r| r.status == 200).unwrap_or(false),
+                PathKind::Tunnel => {
+                    let mut rb = self.http.get(format!("{}/engine/workspaces", self.cfg.endpoint)).header("Origin", self.cfg.origin());
+                    if let Some(t) = &self.socket_token {
+                        rb = rb.bearer_auth(t);
+                    }
+                    match rb.send().await {
+                        Ok(r) => r.status().is_success() && r.bytes().await.is_ok(),
+                        Err(_) => false,
+                    }
+                }
+            };
+            if ok {
+                get.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        (ws, get)
+    }
+    /// OPTCHAT_LAN_BENCH=<n>: once on lan, n engine round trips + n GET /engine/workspaces on lan, a planned switch
+    /// to the tunnel, the same there, and a planned switch back; one `lan-bench` JSON line in the log.
+    async fn bench(self: Arc<Self>, n: usize) {
+        let Some(found) = self.wait_path(PathKind::Lan, Duration::from_secs(90)).await else {
+            lan::log("bench: never on lan");
+            return;
+        };
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        // a warm-up GET each way (connection + ticket), not counted
+        let _ = self.lan_get("/engine/workspaces").await;
+        let (lan_ws, lan_get) = self.sample(n, PathKind::Lan).await;
+        let t = Instant::now();
+        self.set_lan_disabled(true);
+        let to_tunnel = self.wait_path(PathKind::Tunnel, Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let _ = self.sample(1, PathKind::Tunnel).await;
+        let (tun_ws, tun_get) = self.sample(n, PathKind::Tunnel).await;
+        let _ = t;
+        self.set_lan_disabled(false);
+        let to_lan = self.wait_path(PathKind::Lan, Duration::from_secs(30)).await;
+        let mp = |v: &Vec<f64>| {
+            let (m, p) = lan::median_p90(v);
+            json!({ "n": v.len(), "median": (m * 10.0).round() / 10.0, "p90": (p * 10.0).round() / 10.0 })
+        };
+        let out = json!({
+            "lan": { "ws_rtt": mp(&lan_ws), "get": mp(&lan_get) },
+            "tunnel": { "ws_rtt": mp(&tun_ws), "get": mp(&tun_get) },
+            "switch_ms": { "lan_to_tunnel": to_tunnel.map(|x| x.round()), "tunnel_to_lan": to_lan.map(|x| x.round()) },
+            "on_lan_after_ms": found.round(),
+            "stats": format!("{:?}", self.ping_stats.lock()),
+        });
+        lan::log(&format!("lan-bench {out}"));
+    }
+    /// OPTCHAT_LAN_PINGER=<ms>: an engine round trip every <ms> for the whole run; every 5 s a line with the path,
+    /// how many were sent / answered / answered twice, for the switching tests (no lost or doubled answers)
+    async fn pinger(self: Arc<Self>, every_ms: u64) {
+        let mut last = Instant::now();
+        let mut fails = 0u64;
+        let mut rtts: Vec<f64> = vec![];
+        loop {
+            tokio::time::sleep(Duration::from_millis(every_ms)).await;
             if self.stopped.load(Ordering::SeqCst) {
-                break;
+                return;
             }
-            // 0.4 s, doubling, at most 4 s: an engine that comes back is seen within ~5 s
-            let ms = (400u64 << retry.min(4)).min(4000);
-            retry += 1;
-            tokio::time::sleep(Duration::from_millis(ms)).await;
+            let me = self.clone();
+            match me.ping().await {
+                Ok(ms) => rtts.push(ms),
+                Err(_) => fails += 1,
+            }
+            if last.elapsed() >= Duration::from_secs(5) {
+                last = Instant::now();
+                let st = self.ping_stats.lock();
+                let (m, p) = lan::median_p90(&rtts);
+                lan::log(&format!("pinger path={} sent={} answered={} dup={} unanswered={} rtt_med={:.1} p90={:.1}", self.path().map(|p| p.name()).unwrap_or("none"), st.sent, st.answered, st.dup, fails, m, p));
+                rtts.clear();
+            }
         }
     }
 
@@ -275,6 +806,20 @@ impl EngineConn {
                         let _ = tx.send((ok, message, spawned));
                     }
                     None => self.emit(ws, HubEvent::Notice { ok, message, spawned }),
+                }
+            }
+            Some("error") if m["id"].as_u64().is_some() && m["ws"].as_str() == Some("__lanprobe__") => {
+                // an answer to ping(): counted once per id (a second one would be a doubled message)
+                let id = m["id"].as_u64().unwrap();
+                let mut st = self.ping_stats.lock();
+                if st.answered_ids.insert(id) {
+                    st.answered += 1;
+                } else {
+                    st.dup += 1;
+                }
+                drop(st);
+                if let Some(tx) = self.pings.lock().remove(&id) {
+                    let _ = tx.send(());
                 }
             }
             Some("error") if m["id"].as_u64().is_some() => {
@@ -683,6 +1228,15 @@ impl Client {
 
     /// an image from the hub's database (GET /blob/<sha>)
     pub async fn blob(&self, sha: &str) -> Result<(String, Vec<u8>), String> {
+        if self.conn.path() == Some(PathKind::Lan) {
+            // on lan: the pinned connection with the ticket; anything wrong there → the tunnel below
+            if let Ok(r) = self.conn.lan_get(&format!("/engine/blob/{sha}?ws={}", self.ws)).await {
+                if r.status == 200 {
+                    let mt = if r.content_type.is_empty() { "image/png".to_string() } else { r.content_type };
+                    return Ok((mt, r.body.to_vec()));
+                }
+            }
+        }
         let url = format!("{}/engine/blob/{sha}?ws={}", self.conn.cfg.endpoint, self.ws);
         let tok = self.token.lock().clone();
         let r = self.conn.http.get(url).header("Origin", self.conn.cfg.origin()).bearer_auth(tok).send().await.map_err(|e| e.to_string())?;

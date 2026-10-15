@@ -8,9 +8,12 @@ description = "The Platform trait: the shared crates' only door to OS features (
 # implementation for its OS (e.g. `apple-keychain`); nothing OS-specific is compiled otherwise.
 [features]
 apple-keychain = ["dep:security-framework"]
+# bonjour browsing (dns_sd in libSystem) and network path changes (Network.framework NWPathMonitor), for lan-first
+apple-net = ["dep:block2"]
 
 [dependencies]
 gpui.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 security-framework = { version = "3", optional = true }
+block2 = { version = "0.6", optional = true }

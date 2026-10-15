@@ -67,6 +67,13 @@ pub fn render(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspac
         );
     }
     left = left.child(item().child(sdot).child(status.clone()).child(probe("status.text")));
+    // lan-first: which path the engine socket is on, with its last heartbeat round trip ("lan 7 ms" / "tunnel 480 ms")
+    if let Some(h) = s.hub.as_ref() {
+        let p = h.conn.path_label();
+        if !p.is_empty() {
+            left = left.child(item().child(icon(if p.starts_with("lan") { "server" } else { "globe" }, 12., fg)).child(p).child(probe("status.path")));
+        }
+    }
     if let Some(t) = &t {
         if t.parent.is_some() && !narrow {
             left = left.child(item().child(icon("git-fork", 13., fg)).child(format!("#{} {}", t.id, t.mode.as_str())));

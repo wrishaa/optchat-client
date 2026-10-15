@@ -318,6 +318,10 @@ fn status_line(s: &AppState) -> (String, bool) {
     if jobs > 0 {
         t.push_str(&format!(" · {jobs} job{}", if jobs == 1 { "" } else { "s" }));
     }
+    // lan-first: the engine socket's path ("lan 7 ms" / "tunnel 480 ms")
+    if let Some(p) = s.hub.as_ref().map(|h| h.conn.path_label()).filter(|p| !p.is_empty()) {
+        t.push_str(&format!(" · {p}"));
+    }
     (t, false)
 }
 
