@@ -3,4 +3,6 @@
 // The release script (release/testflight.sh) passes DEVELOPMENT_TEAM from the App Store Connect config instead.
 DEVELOPMENT_TEAM =
 OPTCHAT_BUNDLE_ID = com.reframe.optchat
+// the home-screen name; a side-by-side test build (OPTCHAT_BUNDLE_ID=com.reframe.optchat.lantest) passes "OptChat LAN"
+OPTCHAT_DISPLAY_NAME = OptChat
 #include? "Signing.local.xcconfig"
