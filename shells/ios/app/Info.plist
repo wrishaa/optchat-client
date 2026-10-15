@@ -38,6 +38,11 @@
 	<key>NSCameraUsageDescription</key>
 	<string>OptChat uses the camera only to scan an engine token's QR code.</string>
 	<key>NSMicrophoneUsageDescription</key><string>OptChat records your voice while you dictate a message.</string>
+	<!-- lan-first: find the engine's lan front on the local network (bonjour) and connect to it directly -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>OptChat looks for your engine on this network to connect to it directly instead of through the internet.</string>
+	<key>NSBonjourServices</key>
+	<array><string>_optchat-lan._tcp</string></array>
 	<key>ITSAppUsesNonExemptEncryption</key><false/>
 </dict>
 </plist>

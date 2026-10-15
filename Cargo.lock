@@ -3637,19 +3637,26 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "cpal",
  "futures-util",
  "gpui",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "image",
  "libc",
+ "native-tls",
  "optchat-platform",
  "optchat-proto",
  "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
+ "tokio-native-tls",
  "tokio-tungstenite",
  "uuid",
 ]
@@ -3693,6 +3700,7 @@ dependencies = [
 name = "optchat-platform"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "gpui",
  "security-framework",
 ]

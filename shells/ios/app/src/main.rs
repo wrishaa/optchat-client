@@ -43,7 +43,7 @@ mod shell {
     /// (native/qr_scanner.m presents the camera; only oc1 engine tokens end a scan)
     mod qr {
         use gpui::{App, AppContext, Window};
-        use optchat_ui::platform::{Keychain, Platform, ScanDone, SecureStore};
+        use optchat_ui::platform::{BonjourEvent, Keychain, NetPath, Platform, ScanDone, SecureStore};
         use std::sync::Arc;
         /// the Keychain service the app has always used (shared with the macOS app's item format)
         const KEYCHAIN_SERVICE: &str = "com.reframe.optchat.gpui";
@@ -77,6 +77,20 @@ mod shell {
             }
             fn can_scan_qr(&self) -> bool {
                 unsafe { optchat_can_scan_qr() }
+            }
+            /// lan-first: bonjour (dns_sd; Info.plist NSBonjourServices + NSLocalNetworkUsageDescription, the Local
+            /// Network prompt on first use) and NWPathMonitor
+            fn browse(&self, service: &str, on: Arc<dyn Fn(BonjourEvent) + Send + Sync>) -> Option<Box<dyn Send + Sync>> {
+                optchat_ui::platform::apple_net::browse(service, on).map(|h| Box::new(h) as Box<dyn Send + Sync>)
+            }
+            fn watch_net(&self, on: Arc<dyn Fn(NetPath) + Send + Sync>) -> bool {
+                optchat_ui::platform::apple_net::watch_net(on)
+            }
+            /// diag.log (Documents) + stderr, with wall-clock ms for switch timings
+            fn log(&self, line: &str) {
+                let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                super::diag(&format!("{ms} {line}"));
+                eprintln!("{ms} {line}");
             }
             fn scan_qr(&self, window: &mut Window, cx: &mut App, done: ScanDone) {
                 let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();

@@ -739,7 +739,7 @@ impl EngineConn {
             "tunnel": { "ws_rtt": mp(&tun_ws), "get": mp(&tun_get) },
             "switch_ms": { "lan_to_tunnel": to_tunnel.map(|x| x.round()), "tunnel_to_lan": to_lan.map(|x| x.round()) },
             "on_lan_after_ms": found.round(),
-            "stats": format!("{:?}", self.ping_stats.lock()),
+            "pings": { "sent": self.ping_stats.lock().sent, "answered": self.ping_stats.lock().answered, "dup": self.ping_stats.lock().dup },
         });
         lan::log(&format!("lan-bench {out}"));
     }
