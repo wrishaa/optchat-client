@@ -616,10 +616,10 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", Up, Some("Palette")),
         KeyBinding::new("down", Down, Some("Palette")),
         KeyBinding::new("enter", Confirm, Some("Palette")),
-        KeyBinding::new("cmd-enter", SubmitStart, Some("NewTask")),
+        KeyBinding::new("secondary-enter", SubmitStart, Some("NewTask")),
         // inside the dialog's fields too (an Input binds ⌘Enter itself)
-        KeyBinding::new("cmd-enter", SubmitStart, Some("NewTask > Input")),
-        KeyBinding::new("cmd-v", NewTaskPaste, Some("instruction > Input")),
+        KeyBinding::new("secondary-enter", SubmitStart, Some("NewTask > Input")),
+        KeyBinding::new("secondary-v", NewTaskPaste, Some("instruction > Input")),
         // Tab / Shift+Tab move between the dialog's fields (focus stays inside the dialog)
         KeyBinding::new("tab", NextField, Some("NewTask > Input")),
         KeyBinding::new("shift-tab", PrevField, Some("NewTask > Input")),
@@ -775,7 +775,7 @@ impl Render for Palette {
                     .when(on, |d| d.bg(k.accent_bg))
                     .hover(|s| s.bg(k.hover))
                     .child(div().flex_1().min_w_0().overflow_hidden().line_clamp(1).text_ellipsis().child(label.clone()))
-                    .child(div().text_size(px(11.)).text_color(k.muted).child(hint.clone()))
+                    .child(div().text_size(px(11.)).text_color(k.muted).child(crate::ui::shortcut_label(hint)))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(PaletteEvent::Run(cmd.clone())))),
             );
         }

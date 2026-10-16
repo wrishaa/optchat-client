@@ -63,38 +63,38 @@ actions!(
 
 pub fn bind(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-b", ToggleSidebar, None),
-        KeyBinding::new("cmd-1", ShowTasks, None),
-        KeyBinding::new("cmd-2", ShowMemory, None),
-        KeyBinding::new("cmd-3", ShowContext, None),
-        KeyBinding::new("cmd-4", ShowLog, None),
-        KeyBinding::new("cmd-5", ShowModels, None),
-        KeyBinding::new("cmd-,", ShowSettings, None),
-        KeyBinding::new("cmd-6", ShowSettings, None),
-        KeyBinding::new("cmd-shift-n", ShowNotifications, None),
-        KeyBinding::new("cmd-shift-o", WorkspaceMenu, None),
-        KeyBinding::new("cmd-n", NewTask, None),
-        KeyBinding::new("cmd-w", CloseTab, None),
-        KeyBinding::new("cmd-shift-]", NextTab, None),
-        KeyBinding::new("cmd-shift-[", PrevTab, None),
+        KeyBinding::new("secondary-b", ToggleSidebar, None),
+        KeyBinding::new("secondary-1", ShowTasks, None),
+        KeyBinding::new("secondary-2", ShowMemory, None),
+        KeyBinding::new("secondary-3", ShowContext, None),
+        KeyBinding::new("secondary-4", ShowLog, None),
+        KeyBinding::new("secondary-5", ShowModels, None),
+        KeyBinding::new("secondary-,", ShowSettings, None),
+        KeyBinding::new("secondary-6", ShowSettings, None),
+        KeyBinding::new("secondary-shift-n", ShowNotifications, None),
+        KeyBinding::new("secondary-shift-o", WorkspaceMenu, None),
+        KeyBinding::new("secondary-n", NewTask, None),
+        KeyBinding::new("secondary-w", CloseTab, None),
+        KeyBinding::new("secondary-shift-]", NextTab, None),
+        KeyBinding::new("secondary-shift-[", PrevTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-        KeyBinding::new("cmd-.", StopTurn, None),
-        KeyBinding::new("cmd-l", FocusComposer, None),
-        KeyBinding::new("cmd-k", CommandPalette, None),
-        KeyBinding::new("cmd-shift-p", CommandPalette, None),
-        KeyBinding::new("cmd-t", TaskSwitcher, None),
-        KeyBinding::new("cmd-p", TaskSwitcher, None),
-        KeyBinding::new("cmd-0", OpenMainChat, None),
-        KeyBinding::new("cmd-=", ZoomIn, None),
-        KeyBinding::new("cmd-+", ZoomIn, None),
-        KeyBinding::new("cmd--", ZoomOut, None),
-        KeyBinding::new("cmd-shift-0", ZoomReset, None),
+        KeyBinding::new("secondary-.", StopTurn, None),
+        KeyBinding::new("secondary-l", FocusComposer, None),
+        KeyBinding::new("secondary-k", CommandPalette, None),
+        KeyBinding::new("secondary-shift-p", CommandPalette, None),
+        KeyBinding::new("secondary-t", TaskSwitcher, None),
+        KeyBinding::new("secondary-p", TaskSwitcher, None),
+        KeyBinding::new("secondary-0", OpenMainChat, None),
+        KeyBinding::new("secondary-=", ZoomIn, None),
+        KeyBinding::new("secondary-+", ZoomIn, None),
+        KeyBinding::new("secondary--", ZoomOut, None),
+        KeyBinding::new("secondary-shift-0", ZoomReset, None),
         KeyBinding::new("escape", Dismiss, Some("Workspace")),
         KeyBinding::new("m", DictateKey, Some("Workspace && !Input")),
         // while dictating the focus may sit outside the (read-only) text field: Enter / ⌘Enter still send
         KeyBinding::new("enter", DictEnter, Some("Workspace && !Input")),
-        KeyBinding::new("cmd-enter", DictAppend, Some("Workspace && !Input")),
+        KeyBinding::new("secondary-enter", DictAppend, Some("Workspace && !Input")),
     ]);
 }
 
@@ -1033,7 +1033,7 @@ impl Workspace {
             // nothing connected (or no token): what to do next
             let st = self.state.read(cx);
             let (title, sub) = if st.engines.is_empty() {
-                ("Add an OptChat engine", "Its address, then connect one of its workspaces with a client token (kept in the Keychain).")
+                ("Add an OptChat engine", "Ask your engine administrator for a client token, then choose Add engine and paste it. Your workspaces connect automatically.")
             } else if st.meta.is_empty() {
                 ("Connect a workspace", "Open the workspace menu (the icon at the top left) and connect one with its client token.")
             } else {

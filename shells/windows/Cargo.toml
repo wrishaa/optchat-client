@@ -1,0 +1,26 @@
+[package]
+name = "optchat-windows"
+edition.workspace = true
+version.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "optchat"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+optchat-platform.workspace = true
+optchat-ui.workspace = true
+optchat-client.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-resource = "=3.0.12"

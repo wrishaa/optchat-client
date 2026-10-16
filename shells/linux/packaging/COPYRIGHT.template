@@ -1,0 +1,25 @@
+DRAFT TEMPLATE — COPYRIGHT/LICENSE NOTICE TO BE COMPLETED LATER
+
+This file is a drafting aid. It does not grant a license or identify approved
+copyright holders. Do not use it as the approved notice for a production release.
+
+Project: OptChat client
+Source: https://github.com/fabihatasneem/optchat-client
+Package maintainer: Fabiha Tasneem <fabiha@reframe.so>
+
+Project copyright:
+  [TODO: Confirm the copyright holders and applicable years.]
+
+Project license:
+  [TODO: Record the existing, project-approved license terms and full notice.]
+
+RPM SPDX license expression:
+  [TODO: Record the approved expression that matches those terms.]
+
+Third-party components:
+  [TODO: Review dependency and embedded-asset licenses and include the required
+   notices. The package helpers already copy the bundled font and icon notices.]
+
+Before production packaging, complete this notice and save the approved version
+inside the repository. Pass that file with --copyright-file, and pass the
+approved SPDX expression with --license-expression for RPM builds.

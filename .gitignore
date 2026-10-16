@@ -20,6 +20,7 @@ xcuserdata/
 data/
 *.p8
 *.p12
+*.pfx
 *.pem
 *.key
 *.cer
@@ -41,3 +42,13 @@ shells/mac/tools/winid
 
 # OS
 .DS_Store
+
+# Python build tools
+__pycache__/
+*.pyc
+
+# Android local tools, signing keys and Gradle state
+.gradle/
+local.properties
+*.jks
+*.keystore

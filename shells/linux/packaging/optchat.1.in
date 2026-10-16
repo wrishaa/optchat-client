@@ -1,0 +1,26 @@
+.TH OPTCHAT 1 "" "OptChat @VERSION@" "User Commands"
+.SH NAME
+optchat \- native OptChat engine client
+.SH SYNOPSIS
+.B optchat
+.SH DESCRIPTION
+OptChat connects to an OptChat engine and displays its workspaces, chats and tasks.
+Open Workspaces, choose Add engine, and enter a scoped client token to connect.
+The application also provides file attachments and dictation.
+.PP
+OptChat can be started from a terminal or the desktop application menu.
+Press Ctrl+K to open the command palette, F11 to toggle full screen,
+and Ctrl+Q to quit.
+.SH ENVIRONMENT
+.TP
+.B XDG_CONFIG_HOME
+The base directory for application preferences.
+OptChat uses the optchat subdirectory and defaults to ~/.config/optchat.
+.SH FILES
+.TP
+.B ~/.config/optchat
+Application preferences. Removing the package preserves this directory.
+.PP
+Engine tokens are stored in the desktop Secret Service keyring.
+.SH SEE ALSO
+Project documentation: https://github.com/fabihatasneem/optchat-client

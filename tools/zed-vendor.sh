@@ -14,6 +14,10 @@ if [ ! -e "$ZED/Cargo.toml" ]; then
   git submodule update --init --depth 1 vendor/zed || git submodule update --init vendor/zed
 fi
 [ "$(git -C "$ZED" rev-parse HEAD)" = "$ZED_COMMIT" ] || { echo "vendor/zed is not at $ZED_COMMIT (git submodule update vendor/zed)" >&2; exit 1; }
+# Android's path dependency is resolved by Cargo even for desktop-only builds.
+if [ -f "$ROOT/shells/android/prepare-backend.ps1" ]; then
+  bash "$ROOT/tools/gpui-mobile-vendor.sh"
+fi
 PATCHES=("$ROOT"/patches/zed/*.patch)
 [ "${ZED_OPTIONAL_PATCHES:-0}" = 1 ] && PATCHES+=("$ROOT"/patches/zed/optional/*.patch)
 # already applied (and nothing else changed)? then leave the files alone, so cargo doesn't rebuild GPUI

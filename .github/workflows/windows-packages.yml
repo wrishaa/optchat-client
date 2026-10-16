@@ -1,0 +1,299 @@
+name: Windows packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "fabiha/cross-platform-builds"
+    tags:
+      - "windows-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-packages.yml"
+      - ".github/actionlint.yaml"
+      - ".cargo/**"
+      - ".gitattributes"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "assets/**"
+      - "patches/zed/**"
+      - "patches/gpui-mobile/**"
+      - "tools/zed-vendor.ps1"
+      - "shells/android/prepare-backend.ps1"
+      - "vendor/gpui-mobile"
+      - ".gitmodules"
+      - "shells/windows/**"
+      - "tests/windows.ts"
+      - "vendor/zed"
+      - "third_party/native-tls/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-packages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  packages:
+    if: ${{ !startsWith(github.ref, 'refs/tags/windows-v') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            vs_arch: amd64
+          - architecture: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            vs_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PACKAGE_ARCHITECTURE: ${{ matrix.architecture }}
+      PACKAGE_TARGET: ${{ matrix.target }}
+      VS_ARCHITECTURE: ${{ matrix.vs_arch }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build native development packages and test shell hooks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actual = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+          if ($actual -ne $env:PACKAGE_ARCHITECTURE) { throw 'Runner must match the native target architecture.' }
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot enable Git long paths.' }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Visual Studio is missing.' }
+          & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch $env:VS_ARCHITECTURE -HostArch $env:VS_ARCHITECTURE -SkipAutomaticLocation
+          # Pinned packaging compiler. This runs on build agents only.
+          $inno = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $inno -TimeoutSec 120
+          $expectedHash = '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732'
+          if ((Get-FileHash $inno -Algorithm SHA256).Hash -ne $expectedHash) { throw 'Inno Setup checksum mismatch.' }
+          $signature = Get-AuthenticodeSignature $inno
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Pyrsys B.V.') { throw 'Unexpected Inno Setup publisher.' }
+          $innoDirectory = Join-Path $env:LOCALAPPDATA 'Programs/Inno Setup 6'
+          $setup = Start-Process $inno -WindowStyle Hidden -Wait -PassThru -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/SP-', '/NOICONS', '/TASKS=', "/DIR=`"$innoDirectory`"")
+          if ($setup.ExitCode -ne 0) { throw "Inno Setup installation failed: $($setup.ExitCode)" }
+          $env:OPTCHAT_INNO_COMPILER = Join-Path $innoDirectory 'ISCC.exe'
+          if (-not (Test-Path -LiteralPath $env:OPTCHAT_INNO_COMPILER)) { throw 'Pinned Inno Setup compiler is missing.' }
+          ./shells/windows/tests/test-inno-selection.ps1
+          ./shells/windows/tests/test-packaging.ps1
+          ./shells/windows/tests/test-vendor.ps1
+          ./shells/windows/release/build.ps1 -Architecture $env:PACKAGE_ARCHITECTURE -Formats exe,zip,msix
+          cargo test --locked --release -p optchat-windows --target $env:PACKAGE_TARGET --target-dir target/windows
+          if ($LASTEXITCODE -ne 0) { throw 'Windows shell tests failed.' }
+          Get-ChildItem "dist-dev/windows-$env:PACKAGE_ARCHITECTURE" -File |
+            Where-Object Extension -in @('.zip', '.msix') |
+            ForEach-Object { ./shells/windows/tests/check-package.ps1 -Package $_.FullName -Architecture $env:PACKAGE_ARCHITECTURE }
+          $initial = @(Get-ChildItem "dist-dev/windows-$env:PACKAGE_ARCHITECTURE/*-Setup.exe")
+          if ($initial.Count -ne 1) { throw 'Expected exactly one initial installer.' }
+          ./shells/windows/release/build.ps1 -Architecture $env:PACKAGE_ARCHITECTURE -Revision 1 -Formats exe,zip
+          $upgrade = @(Get-ChildItem "dist-dev/windows-$env:PACKAGE_ARCHITECTURE/*-Setup.exe" | Where-Object FullName -ne $initial[0].FullName)
+          if ($upgrade.Count -ne 1) { throw 'Expected exactly one upgrade installer.' }
+          ./shells/windows/tests/test-installer.ps1 -Installer $initial[0].FullName -Upgrade $upgrade[0].FullName -Architecture $env:PACKAGE_ARCHITECTURE
+
+      - name: Save development packages and evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-${{ matrix.architecture }}
+          path: |
+            dist-dev/windows-${{ matrix.architecture }}/
+            build/windows/${{ matrix.architecture }}/**/imports.txt
+            build/windows/installer-test-*/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  release-preflight:
+    if: startsWith(github.ref, 'refs/tags/windows-v')
+    runs-on: ubuntu-latest
+    environment: windows-release
+    outputs:
+      source_commit: ${{ steps.validate.outputs.source_commit }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Validate release configuration
+        id: validate
+        shell: pwsh
+        env:
+          RELEASE_ENABLED: ${{ vars.WINDOWS_RELEASE_ENABLED }}
+          LICENSE_NOTICE: ${{ vars.WINDOWS_LICENSE_NOTICE }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_ENABLED -ne 'true') { throw 'Configure the protected windows-release environment before enabling releases.' }
+          if ($env:GITHUB_REF_NAME -notmatch '^windows-v(\d+\.\d+\.\d+)\.([1-9]\d*)$' -or [uint64]$Matches[2] -gt 65535) {
+            throw 'Use windows-v<workspace version>.<revision>, with revision 1..65535.'
+          }
+          if (-not $env:LICENSE_NOTICE) { throw 'Set WINDOWS_LICENSE_NOTICE to an approved project and dependency notice file in the repository.' }
+          $notice = (Resolve-Path -LiteralPath $env:LICENSE_NOTICE).Path
+          $root = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE) + [IO.Path]::DirectorySeparatorChar
+          if (-not $notice.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or (Get-Item $notice).Length -eq 0) {
+            throw 'The approved notice must be a nonempty repository file.'
+          }
+          $commit = & git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the release source commit.' }
+          "source_commit=$commit" >> $env:GITHUB_OUTPUT
+
+  release-packages:
+    needs: release-preflight
+    # Dedicated disposable profiles with native MSVC, SDK, Rust, CMake, Deno,
+    # Inno Setup 6.7.3, an interactive desktop, and the organization's signing provider.
+    # Never schedule pull-request jobs on these signing runners.
+    environment: windows-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner_label: X64
+            target: x86_64-pc-windows-msvc
+            vs_arch: amd64
+          - architecture: arm64
+            runner_label: ARM64
+            target: aarch64-pc-windows-msvc
+            vs_arch: arm64
+    runs-on: [
+      self-hosted,
+      Windows,
+      "${{ matrix.runner_label }}",
+      optchat-release,
+    ]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PACKAGE_ARCHITECTURE: ${{ matrix.architecture }}
+      PACKAGE_TARGET: ${{ matrix.target }}
+      VS_ARCHITECTURE: ${{ matrix.vs_arch }}
+      SIGNING_PUBLISHER: ${{ vars.WINDOWS_PUBLISHER }}
+      SIGNING_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
+      SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+      LICENSE_NOTICE: ${{ vars.WINDOWS_LICENSE_NOTICE }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build and qualify signed installers
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./shells/windows/release/common.ps1
+          if ($env:GITHUB_REF_NAME -notmatch '^windows-v(\d+\.\d+\.\d+)\.([1-9]\d*)$') { throw 'Invalid release tag.' }
+          $version = "$($Matches[1]).$($Matches[2])"
+          $revision = [uint16]$Matches[2]
+          $baseline = "$($Matches[1]).$($revision - 1)"
+          $actual = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+          if ($actual -ne $env:PACKAGE_ARCHITECTURE) { throw 'Use a native architecture runner.' }
+          foreach ($name in @('SIGNING_PUBLISHER', 'SIGNING_THUMBPRINT', 'SIGNING_TIMESTAMP_URL', 'LICENSE_NOTICE')) {
+            if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Missing release configuration: $name" }
+          }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Visual Studio is missing.' }
+          & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch $env:VS_ARCHITECTURE -HostArch $env:VS_ARCHITECTURE -SkipAutomaticLocation
+          $null = Find-InnoCompiler # OptChat.iss enforces the compiler version.
+          Assert-ReleaseSource (Get-Location).Path $version
+          ./shells/windows/tests/test-packaging.ps1
+          ./shells/windows/tests/test-vendor.ps1
+          $signing = @{
+            Publisher = $env:SIGNING_PUBLISHER
+            CertificateThumbprint = $env:SIGNING_THUMBPRINT
+            TimestampUrl = $env:SIGNING_TIMESTAMP_URL
+            LicenseNotice = $env:LICENSE_NOTICE
+          }
+          # A lower-version test fixture exercises upgrade logic; it is never published.
+          ./shells/windows/release/build.ps1 -Architecture $env:PACKAGE_ARCHITECTURE -Revision ($revision - 1) @signing
+          ./shells/windows/release/build.ps1 -Architecture $env:PACKAGE_ARCHITECTURE -Revision $revision -Release @signing
+          $env:OPTCHAT_WINDOWS_REVISION = [string]$revision
+          Invoke-Native cargo @('test', '--locked', '--release', '-p', 'optchat-windows', '--target', $env:PACKAGE_TARGET, '--target-dir', 'target/windows')
+          ./shells/windows/tests/test-installer.ps1 `
+            -Installer "dist-dev/windows-$env:PACKAGE_ARCHITECTURE/OptChat-$baseline-windows-$env:PACKAGE_ARCHITECTURE-Setup.exe" `
+            -Upgrade "dist/windows-$env:PACKAGE_ARCHITECTURE/OptChat-$version-windows-$env:PACKAGE_ARCHITECTURE-Setup.exe" `
+            -Architecture $env:PACKAGE_ARCHITECTURE -RequireSignature -RequireProductionSignature -SmokeTest
+
+      - name: Save qualified release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-release-${{ matrix.architecture }}
+          path: dist/windows-${{ matrix.architecture }}/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Save qualification logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-qualification-${{ matrix.architecture }}
+          path: |
+            build/windows/installer-test-*/*.log
+            build/windows/${{ matrix.architecture }}/**/imports.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  draft-release:
+    needs: [release-preflight, release-packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: windows-release-*
+          path: packages
+          merge-multiple: true
+      - name: Create draft with the tested installers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ needs.release-preflight.outputs.source_commit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME.Substring('windows-v'.Length)
+          $assets = @()
+          foreach ($arch in @('x64', 'arm64')) {
+            $base = "OptChat-$version-windows-$arch"
+            $manifest = Get-Content "packages/$base-release.json" -Raw | ConvertFrom-Json
+            if (-not $manifest.build.release -or $manifest.build.source_dirty -or
+                $manifest.build.source_commit -ne $env:SOURCE_COMMIT -or $manifest.build.version -ne $version -or
+                $manifest.build.architecture -ne $arch -or $manifest.artifacts.Count -ne 1) { throw 'Release provenance mismatch.' }
+            $entry = $manifest.artifacts[0]
+            if ($entry.file -cne "$base-Setup.exe" -or $entry.signature.status -ne 'Valid' -or -not $entry.signature.timestamped) { throw 'Invalid release installer metadata.' }
+            $hash = (Get-FileHash "packages/$base-Setup.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -cne $entry.sha256 -or (Get-Content "packages/$base-Setup.exe.sha256" -Raw).Trim() -cne "$hash  $base-Setup.exe") { throw 'Artifact checksum mismatch.' }
+            $assets += @("packages/$base-Setup.exe", "packages/$base-Setup.exe.sha256", "packages/$base-release.json")
+          }
+          $existing = & gh release view $env:GITHUB_REF_NAME --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($existing | ConvertFrom-Json).isDraft) { throw 'Refusing to change a published release.' }
+          } else {
+            $notes = @"
+          Download the installer for your Windows PC: x64 for Intel/AMD, ARM64 for Windows on ARM.
+
+          Close OptChat before upgrading. Preferences and saved connections are retained.
+
+          Release manager: complete the clean-machine, real-engine and visual checks in shells/windows/release/QUALIFICATION.md before publishing this draft. Add user-facing release notes and remove this paragraph after approval.
+          "@
+            Set-Content release-notes.md -Value $notes -Encoding utf8
+            & gh release create $env:GITHUB_REF_NAME --verify-tag --draft --title "OptChat $version for Windows" --notes-file release-notes.md
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot create draft release.' }
+          }
+          & gh release upload $env:GITHUB_REF_NAME @assets
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot upload release files; existing assets are never overwritten.' }

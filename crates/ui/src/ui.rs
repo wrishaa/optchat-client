@@ -79,8 +79,17 @@ pub fn status_dot(id: impl Into<SharedString>, status: &str, size: f32, cx: &App
     }
 }
 
+/// Render shortcut labels using GPUI's desktop shortcut modifier.
+pub fn shortcut_label(text: &str) -> String {
+    if Modifiers::secondary_key().control {
+        text.replace("⇧", "Shift+").replace("⌘", "Ctrl+").replace("⌃", "Ctrl+").replace("⌥", "Alt+").replace("⇥", "Tab")
+    } else {
+        text.to_string()
+    }
+}
+
 pub fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    let t: SharedString = text.into();
+    let t: SharedString = shortcut_label(&text.into()).into();
     move |w, cx| {
         // UI tests: the text of the last tooltip shown
         set_state_extra("tooltip", serde_json::json!(t.to_string()));

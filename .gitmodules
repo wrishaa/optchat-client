@@ -4,3 +4,7 @@
 	branch = gpui-ios-platform
 	shallow = true
 	ignore = dirty
+[submodule "vendor/gpui-mobile"]
+	path = vendor/gpui-mobile
+	url = https://github.com/itsbalamurali/gpui-mobile.git
+	ignore = dirty

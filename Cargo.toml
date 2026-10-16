@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/theme", "crates/platform", "crates/client", "crates/ui", "shells/mac", "shells/ios/app"]
-# `cargo build` at the root builds the shared crates and the macOS shell; the iOS shell is built by
-# shells/ios/app/build.sh (Xcode's script phase) for an iOS target.
+members = ["crates/proto", "crates/theme", "crates/platform", "crates/client", "crates/ui", "shells/mac", "shells/linux", "shells/windows", "shells/ios/app", "shells/android/app"]
+# Root builds are portable: build shared crates by default, select the native shell with
+# cargo run -p optchat-linux / optchat-mac / optchat-windows. The iOS build script selects its own target.
 # vendor/zed is zed's own workspace (path deps under the root would otherwise join this one)
-exclude = ["vendor"]
-default-members = ["crates/proto", "crates/theme", "crates/platform", "crates/client", "crates/ui", "shells/mac"]
+exclude = ["vendor", "vendor/gpui-mobile", "third_party/native-tls"]
+default-members = ["crates/proto", "crates/theme", "crates/platform", "crates/client", "crates/ui"]
 
 [workspace.package]
 edition = "2021"
@@ -25,6 +25,9 @@ sha2 = "0.10"
 log = "0.4"
 libc = "=0.2.186" # one pin for every shell (the iOS build needed it)
 cpal = "0.16"
+# The Linux shell shares its Secret Service client and executor with GPUI.
+oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
+smol = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 optchat-proto = { path = "crates/proto" }
 optchat-theme = { path = "crates/theme" }
@@ -62,6 +65,7 @@ ztracing_macro = { path = "vendor/zed/crates/ztracing_macro" }
 
 # the zed workspace's crates.io patches that GPUI's dependency graph needs
 [patch.crates-io]
+native-tls = { path = "third_party/native-tls" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
 

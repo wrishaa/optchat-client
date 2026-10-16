@@ -3,7 +3,8 @@
 //! (send / cancel / stopTool / settings / global / control / spawn / approve) and rpc calls come back by id.
 //! Reconnects with backoff (0.4 s doubling to 5 s) and resnapshots. Images come from GET /blob/<sha>; each dictation
 //! is a second, short-lived socket to /stt. Every URL carries `db=t<id>` on a test instance.
-//! TLS: the macOS trust store (native-tls / Security.framework), verification always on.
+//! TLS: the platform trust store through native-tls, verification always on. Linux builds also honor Fedora's
+//! OpenSSL system crypto policy through the local native-tls patch.
 use futures_util::{SinkExt, StreamExt};
 use optchat_proto::api::*;
 use optchat_proto::rates::Per1M;

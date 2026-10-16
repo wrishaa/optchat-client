@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "build": {
+    "application": "OptChat",
+    "version": "0.1.0.4",
+    "architecture": "x64",
+    "target": "x86_64-pc-windows-msvc",
+    "source_commit": "ae0c06b9f2f7988974cc5b9ba6e3328af6fa3823",
+    "source_dirty": true,
+    "gpui_commit": "97dc71d8b8f79012c1441aa01121fba95667292a",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "built_utc": "2026-10-15T09:39:37.9181867Z",
+    "static_crt": true,
+    "signed": true,
+    "publisher": "CN=OptChat Development",
+    "release": false,
+    "license_notice_supplied": false
+  },
+  "packaging": {
+    "inno_setup_version": "6.7.3"
+  },
+  "artifacts": [
+    {
+      "file": "OptChat-0.1.0.4-windows-x64-Setup.exe",
+      "bytes": 8077536,
+      "sha256": "c495c2fd1372093e7df68b44a30e36aee156a4f8c36c06005eb99c88965e6f0f",
+      "signature": {
+        "status": "Valid",
+        "publisher": "CN=OptChat Development",
+        "thumbprint": "BBF7C8723A53DA06B05C7B1E1D9F9A276AACA68A",
+        "timestamped": false
+      }
+    }
+  ]
+}

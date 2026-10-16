@@ -1,0 +1,164 @@
+name: Linux packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fabiha/linux-packages, fabiha/cross-platform-builds]
+    tags: [linux-v*-preview.*]
+    paths:
+      - .github/workflows/linux-packages.yml
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/**
+      - shells/linux/**
+      - assets/**
+      - patches/**
+      - third_party/native-tls/**
+      - tools/zed-vendor.sh
+      - tools/gpui-mobile-vendor.sh
+      - tools/release_version.py
+      - tools/prepare_linux_release.py
+      - tests/release-tools.py
+      - vendor/gpui-mobile
+      - .gitmodules
+      - tests/linux-tls.py
+
+permissions:
+  contents: read
+
+jobs:
+  native-packages:
+    name: ${{ matrix.format }} on ${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+            format: deb
+          - architecture: x86_64
+            runner: ubuntu-24.04
+            format: rpm
+          - architecture: aarch64
+            runner: ubuntu-24.04-arm
+            format: deb
+          - architecture: aarch64
+            runner: ubuntu-24.04-arm
+            format: rpm
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PACKAGE_FORMAT: ${{ matrix.format }}
+      PACKAGE_ARCHITECTURE: ${{ matrix.architecture }}
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate tag and derive package versions
+        id: version
+        run: |
+          python3 tools/release_version.py linux --github-output "$GITHUB_OUTPUT"
+          python3 tests/release-tools.py
+
+      - name: Prepare rootless Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman uidmap passt fuse-overlayfs openssl python3
+          test "$(uname -m)" = "$PACKAGE_ARCHITECTURE"
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+
+      - name: Build two development revisions on the native baseline
+        run: |
+          previous_revision="${{ steps.version.outputs.previous_revision }}"
+          current_revision="${{ steps.version.outputs.revision }}"
+          printf 'OPTCHAT_PREVIOUS_REVISION=%s\nOPTCHAT_CURRENT_REVISION=%s\n' \
+            "$previous_revision" "$current_revision" >> "$GITHUB_ENV"
+          shells/linux/release/container-build.sh "$PACKAGE_FORMAT" --revision "$previous_revision"
+          shells/linux/release/container-build.sh "$PACKAGE_FORMAT" --revision "$current_revision"
+
+      - name: Check dependencies, upgrade, removal and reinstall
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          case "$PACKAGE_FORMAT" in
+            deb)
+              architecture=amd64
+              if [ "$PACKAGE_ARCHITECTURE" = aarch64 ]; then architecture=arm64; fi
+              directory="dist-dev/ubuntu24.04-$PACKAGE_ARCHITECTURE"
+              previous="$directory/optchat_${version}-${OPTCHAT_PREVIOUS_REVISION}_${architecture}.deb"
+              current="$directory/optchat_${version}-${OPTCHAT_CURRENT_REVISION}_${architecture}.deb"
+              ;;
+            rpm)
+              directory="dist-dev/fedora43-$PACKAGE_ARCHITECTURE"
+              previous="$directory/optchat-${version}-${OPTCHAT_PREVIOUS_REVISION}.fc43.${PACKAGE_ARCHITECTURE}.rpm"
+              current="$directory/optchat-${version}-${OPTCHAT_CURRENT_REVISION}.fc43.${PACKAGE_ARCHITECTURE}.rpm"
+              ;;
+          esac
+          shells/linux/tests/check-install.sh "$current" "$previous"
+          printf 'OPTCHAT_CURRENT_PACKAGE=%s\n' "$current" >> "$GITHUB_ENV"
+
+      - name: Qualify HTTPS and WSS against Fedora crypto policies
+        if: matrix.format == 'rpm'
+        run: shells/linux/tests/check-tls.sh
+
+      - name: Prepare the user download
+        run: |
+          python3 shells/linux/release/prepare_download.py "$OPTCHAT_CURRENT_PACKAGE" \
+            --output-dir "build/downloads/$PACKAGE_FORMAT-$PACKAGE_ARCHITECTURE"
+
+      - name: Save the user download
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: linux-${{ matrix.format }}-${{ matrix.architecture }}
+          path: build/downloads/${{ matrix.format }}-${{ matrix.architecture }}/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save build and qualification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: linux-evidence-${{ matrix.format }}-${{ matrix.architecture }}
+          path: |
+            dist-dev/ubuntu24.04-${{ matrix.architecture }}/
+            dist-dev/fedora43-${{ matrix.architecture }}/
+            build/qualification/
+          if-no-files-found: warn
+          retention-days: 14
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/linux-v')
+    needs: native-packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: linux-[dr]*
+          path: downloads
+      - name: Verify all four installers and stage the release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 tools/prepare_linux_release.py downloads --output-dir build/linux-release \
+            --tag "$RELEASE_TAG" --source-commit "$SOURCE_COMMIT" --ci-run-url "$CI_RUN_URL"
+      - name: Create draft preview with verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # Existing releases/assets are never changed by a retry.
+          gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease \
+            --title "OptChat $RELEASE_TAG" --notes-file build/linux-release/release-notes.md
+          rm build/linux-release/release-notes.md
+          gh release upload "$RELEASE_TAG" build/linux-release/*

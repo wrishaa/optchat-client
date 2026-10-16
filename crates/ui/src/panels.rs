@@ -1220,10 +1220,19 @@ impl SettingsPanel {
             let log: Vec<String> = s.server_log.iter().rev().take(80).rev().cloned().collect();
             let stats = s.stats.clone();
             let _ = (g, st1, st2, st3, log);
+            let updates = if cfg!(target_os = "windows") {
+                Some(section(cx)
+                    .child(section_title("updates", cx))
+                    .child(div().text_size(px(12.)).text_color(k.muted).child("Download the latest Windows installer. Close OptChat before installing it; your settings and connections are kept."))
+                    .child(btn_small("download-updates", "Download updates", Tone::Plain, cx)
+                        .child(probe("settings.updates"))
+                        .on_click(|_, _, cx| cx.open_url("https://github.com/fabihatasneem/optchat-client/releases"))))
+            } else { None };
             return pad(div())
                 .child(probe("settings"))
                 .child(tabs)
                 .child(engines)
+                .children(updates)
                 .child(
                     section(cx)
                         .child(section_title("appearance", cx))
@@ -1267,7 +1276,7 @@ impl SettingsPanel {
                                 .items_center()
                                 .justify_between()
                                 .mt(px(10.))
-                                .child(div().text_size(px(13.)).child("Chat text size").child(div().text_size(px(11.)).text_color(k.muted).child("⌘= bigger · ⌘- smaller · ⌘⇧0 actual size")))
+                                .child(div().text_size(px(13.)).child("Chat text size").child(div().text_size(px(11.)).text_color(k.muted).child(crate::ui::shortcut_label("⌘= bigger · ⌘- smaller · ⌘⇧0 actual size"))))
                                 .child(
                                     div()
                                         .flex()
@@ -1410,7 +1419,7 @@ impl SettingsPanel {
         let s = self.state.read(cx);
         let mut sec = section(cx).child(section_title("engines and workspaces", cx)).child(probe("settings.engines"));
         if s.engines.is_empty() {
-            sec = sec.child(div().text_size(px(12.)).text_color(k.muted).mb(px(8.)).child("No engine yet: add one (its address, e.g. chat.example.dev), then connect a workspace with its client token."));
+            sec = sec.child(div().text_size(px(12.)).text_color(k.muted).mb(px(8.)).child("No engine yet. Ask your engine administrator for a client token, then choose Add engine and paste it. Your workspaces connect automatically."));
         }
         for (i, e) in s.engines.iter().enumerate() {
             let online = e.online.unwrap_or(false);

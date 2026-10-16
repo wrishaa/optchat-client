@@ -1,0 +1,13 @@
+FROM registry.fedoraproject.org/fedora:43
+ARG RUST_VERSION
+RUN dnf install -y gcc gcc-c++ clang cmake make pkgconf-pkg-config git curl-minimal ca-certificates \
+    python3 perl alsa-lib-devel fontconfig-devel openssl-devel wayland-devel libxcb-devel \
+    libxkbcommon-x11-devel vulkan-loader rpm-build rpm-sign desktop-file-utils binutils \
+    cpio rpmlint createrepo_c gnupg2 \
+    && dnf clean all
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+RUN curl --fail --show-error --location https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain "$RUST_VERSION" \
+    && rm /tmp/rustup-init.sh
+ENV PATH=/opt/cargo/bin:$PATH
+WORKDIR /workspace

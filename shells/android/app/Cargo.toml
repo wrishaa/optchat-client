@@ -1,0 +1,22 @@
+[package]
+name = "optchat-android"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "optchat_android"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+gpui.workspace = true
+gpui-mobile = { path = "../../../vendor/gpui-mobile", default-features = false }
+optchat-client.workspace = true
+optchat-ui.workspace = true
+optchat-platform.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+jni = "0.22"
+log.workspace = true

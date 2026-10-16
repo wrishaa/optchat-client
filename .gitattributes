@@ -1,0 +1,4 @@
+# GPUI patches must stay in their original form on Windows checkouts.
+patches/zed/*.patch text eol=lf
+patches/zed/optional/*.patch text eol=lf
+patches/gpui-mobile/*.patch text eol=lf

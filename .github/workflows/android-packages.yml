@@ -1,0 +1,154 @@
+name: Android packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fabiha/cross-platform-builds]
+    tags: [android-v*]
+    paths:
+      - .github/workflows/android-packages.yml
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/**
+      - assets/**
+      - shells/android/**
+      - tools/zed-vendor.ps1
+      - tools/release_version.py
+      - tests/release-tools.py
+      - patches/**
+      - vendor/zed
+      - vendor/gpui-mobile
+      - .gitmodules
+      - .cargo/**
+      - .gitattributes
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.version.outputs.version_code }}
+      name: ${{ steps.version.outputs.version_name }}
+      production: ${{ steps.version.outputs.production }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - id: version
+        run: |
+          python3 tools/release_version.py android --github-output "$GITHUB_OUTPUT"
+          python3 tests/release-tools.py
+
+  package:
+    needs: version
+    runs-on: windows-2022
+    timeout-minutes: 90
+    environment: ${{ needs.version.outputs.production == 'true' && 'android-release' || 'android-development' }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VERSION_CODE: ${{ needs.version.outputs.code }}
+      VERSION_NAME: ${{ needs.version.outputs.name }}
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Prepare the pinned Android tools
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot enable Git long paths.' }
+          $env:JAVA_HOME = $env:JAVA_HOME_21_X64
+          if (-not (Test-Path "$env:JAVA_HOME/bin/java.exe")) { throw 'The runner needs JDK 21.' }
+          "JAVA_HOME=$env:JAVA_HOME" >> $env:GITHUB_ENV
+          $sdkmanager = Join-Path $env:ANDROID_HOME 'cmdline-tools/latest/bin/sdkmanager.bat'
+          if (-not (Test-Path $sdkmanager)) { throw 'Android SDK command-line tools are missing.' }
+          1..100 | ForEach-Object { 'y' } | & $sdkmanager --licenses
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare Android SDK licenses on this build agent.' }
+          & $sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;29.0.14206865' 'platform-tools'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot install pinned Android SDK/NDK components.' }
+          rustup target add aarch64-linux-android
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot install the Android Rust target.' }
+      - name: Build development APK
+        if: needs.version.outputs.production != 'true'
+        run: ./shells/android/build-app.ps1 -VersionCode ([int]$env:VERSION_CODE)
+      - name: Build signed release candidate
+        if: needs.version.outputs.production == 'true'
+        env:
+          RELEASE_ENABLED: ${{ vars.ANDROID_RELEASE_ENABLED }}
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          OPTCHAT_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          OPTCHAT_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          OPTCHAT_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          OPTCHAT_ANDROID_CERT_SHA256: ${{ vars.ANDROID_CERT_SHA256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_ENABLED -ne 'true' -or -not $env:KEYSTORE_BASE64) {
+            throw 'Configure and approve the protected android-release environment first.'
+          }
+          $env:OPTCHAT_ANDROID_KEYSTORE = Join-Path $env:RUNNER_TEMP 'optchat-signing.keystore'
+          try {
+            [IO.File]::WriteAllBytes($env:OPTCHAT_ANDROID_KEYSTORE, [Convert]::FromBase64String($env:KEYSTORE_BASE64))
+            ./shells/android/build-app.ps1 -VersionCode ([int]$env:VERSION_CODE) -Release
+          } finally { Remove-Item -LiteralPath $env:OPTCHAT_ANDROID_KEYSTORE -ErrorAction SilentlyContinue }
+      - name: Save versioned APK and provenance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: android-arm64
+          path: |
+            dist-dev/android-app/*.apk*
+            dist/android-app/*.apk*
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    if: needs.version.outputs.publish == 'true'
+    needs: [version, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: android-arm64
+          path: packages
+      - name: Verify source, version and checksums
+        env:
+          VERSION_CODE: ${{ needs.version.outputs.code }}
+          VERSION_NAME: ${{ needs.version.outputs.name }}
+          PRODUCTION: ${{ needs.version.outputs.production }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          packages = list(Path('packages').rglob('*.apk'))
+          if len(packages) != 1:
+              raise SystemExit('Expected exactly one ARM64 APK')
+          p = packages[0]
+          d = json.loads(Path(str(p) + '.build.json').read_text())
+          digest = hashlib.sha256(p.read_bytes()).hexdigest()
+          assert d['sourceCommit'] == os.environ['SOURCE_COMMIT'] and d['workingTreeDirty'] is False
+          assert d['versionCode'] == int(os.environ['VERSION_CODE']) and d['versionName'] == os.environ['VERSION_NAME']
+          assert d['abi'] == 'arm64-v8a' and d['release'] == (os.environ['PRODUCTION'] == 'true')
+          assert d['sha256'] == digest and Path(str(p) + '.sha256').read_text().strip() == f'{digest}  {p.name}'
+          Path('release-notes.md').write_text(f"OptChat {d['versionName']} for Android ARM64.\n\nDownload the APK and its checksum. This is a draft candidate; device and real-engine qualification must be reviewed before publishing.\n")
+          PY
+      - name: Create draft with the verified APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          PRODUCTION: ${{ needs.version.outputs.production }}
+        run: |
+          args=(--verify-tag --draft --title "OptChat $RELEASE_TAG" --notes-file release-notes.md)
+          if [ "$PRODUCTION" != true ]; then args+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" "${args[@]}"
+          find packages -type f -name '*.apk*' -print0 | xargs -0 gh release upload "$RELEASE_TAG"

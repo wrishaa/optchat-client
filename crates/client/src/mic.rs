@@ -178,6 +178,7 @@ impl Mic {
     /// Starts recording from the default input device. Errors: "no microphone found", "microphone access is blocked"
     /// (macOS permission denied or restricted), "microphone failed: …".
     pub fn start(on_chunk: Arc<dyn Fn(MicChunk) + Send + Sync>) -> anyhow::Result<Mic> {
+        optchat_platform::prepare_microphone().map_err(|message| anyhow!(message))?;
         if let Some(1 | 2) = authorization() {
             bail!("microphone access is blocked");
         }

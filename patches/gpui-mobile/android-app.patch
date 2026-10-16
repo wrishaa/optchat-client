@@ -1,0 +1,1208 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index b3ff299..a7ddb91 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -12,13 +12,14 @@ categories = ["gui", "os"]
+ readme = "README.md"
+ 
+ [features]
+-default = ["url_launcher", "shared_preferences", "path_provider",
++default = ["components", "url_launcher", "shared_preferences", "path_provider",
+            "package_info", "device_info", "connectivity", "network_info", "vibration",
+            "battery", "share", "sensors", "webview", "file_selector", "image_picker", "camera",
+            "permission_handler", "notifications", "location", "audio", "video_player",
+            "clipboard", "local_auth", "in_app_review", "contacts", "maps_launcher",
+            "calendar", "deeplink", "microphone", "maps", "media_session"]
+ url_launcher = []
++components = []
+ shared_preferences = []
+ path_provider = []
+ package_info = []
+@@ -62,7 +63,7 @@ futures      = "0.3"
+ raw-window-handle = "0.6"
+ 
+ # ── GPUI core crate (provides Platform trait, event types, geometry, etc.) ───
+-gpui = { git = "https://github.com/zed-industries/zed", rev = "5688167d224b5eca54875d49afb8bfd73a07915a", package = "gpui", default-features = false }
++gpui = { path = "../zed/crates/gpui", default-features = false }
+ 
+ # ── iOS ──────────────────────────────────────────────────────────────────────
+ 
+@@ -79,8 +80,8 @@ uuid                = { version = "1", features = ["v4", "v5"] }
+ block2              = "0.6"
+ 
+ # wgpu renderer (Metal backend on iOS/Android)
+-gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "5688167d224b5eca54875d49afb8bfd73a07915a", package = "gpui_wgpu", features = ["font-kit"] }
+-wgpu = { git = "https://github.com/zed-industries/wgpu.git", branch = "v29" }
++gpui_wgpu = { path = "../zed/crates/gpui_wgpu" }
++wgpu = "29.0.4"
+ 
+ # Text / font stack
+ pathfinder_geometry = "0.5"
+@@ -109,7 +110,7 @@ android-activity = { version = "0.6", features = ["native-activity"] }
+ android_logger = "0.15"
+ 
+ # wgpu renderer (Vulkan backend on Android)
+-gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "5688167d224b5eca54875d49afb8bfd73a07915a", package = "gpui_wgpu", features = ["font-kit"] }
++gpui_wgpu = { path = "../zed/crates/gpui_wgpu" }
+ 
+ # rustc-hash is required by the PlatformKeyboardMapper trait signature
+ rustc-hash = "2"
+diff --git a/src/android/dispatcher.rs b/src/android/dispatcher.rs
+index 714e26e..58b39c9 100644
+--- a/src/android/dispatcher.rs
++++ b/src/android/dispatcher.rs
+@@ -34,7 +34,7 @@ use std::{
+     time::{Duration, Instant},
+ };
+ 
+-use gpui::{PlatformDispatcher, Priority, RunnableVariant, ThreadTaskTimings};
++use gpui::{PlatformDispatcher, Priority, RunnableVariant};
+ use parking_lot::Mutex;
+ 
+ // ── NDK / libc symbols we need ────────────────────────────────────────────────
+@@ -495,21 +495,6 @@ unsafe fn libc_fcntl(fd: i32, cmd: i32, arg: i32) -> i32 {
+ // ── impl PlatformDispatcher ───────────────────────────────────────────────────
+ 
+ impl PlatformDispatcher for AndroidDispatcher {
+-    fn get_all_timings(&self) -> Vec<ThreadTaskTimings> {
+-        // Task-level profiling is not yet implemented on Android.
+-        // Return an empty vec — GPUI treats this as "no data available".
+-        Vec::new()
+-    }
+-
+-    fn get_current_thread_timings(&self) -> ThreadTaskTimings {
+-        ThreadTaskTimings {
+-            thread_name: std::thread::current().name().map(|n| n.to_string()),
+-            thread_id: std::thread::current().id(),
+-            timings: Vec::new(),
+-            total_pushed: 0,
+-        }
+-    }
+-
+     fn is_main_thread(&self) -> bool {
+         // Delegate to the existing `is_main_thread` method.
+         AndroidDispatcher::is_main_thread(self)
+diff --git a/src/android/display.rs b/src/android/display.rs
+index f5bb855..345abee 100644
+--- a/src/android/display.rs
++++ b/src/android/display.rs
+@@ -223,10 +223,13 @@ impl fmt::Debug for AndroidDisplay {
+ // ── impl PlatformDisplay ──────────────────────────────────────────────────────
+ 
+ impl PlatformDisplay for AndroidDisplay {
++    fn refresh_interval(&self) -> Option<std::time::Duration> {
++        // Sample the native display timing before using this value for performance claims.
++        None
++    }
++
+     fn id(&self) -> DisplayId {
+-        // Truncate the u64 id to u32 — on Android the pointer-derived id
+-        // fits in 32 bits for the lower half, and DisplayId only stores u32.
+-        DisplayId::new(self.id as u32)
++        DisplayId::new(self.id)
+     }
+ 
+     fn uuid(&self) -> Result<uuid::Uuid> {
+diff --git a/src/android/editor.rs b/src/android/editor.rs
+new file mode 100644
+index 0000000..a231c3c
+--- /dev/null
++++ b/src/android/editor.rs
+@@ -0,0 +1,120 @@
++//! IME snapshots are queued on Java's UI thread and applied on GPUI's event thread.
++//! No GPUI entity or window is accessed from a JNI callback.
++use gpui::{FocusId, PlatformInputHandler};
++use std::{cell::RefCell, rc::{Rc, Weak}, sync::{Mutex, atomic::{AtomicBool, Ordering}}};
++use jni::objects::JValue;
++
++type Handler = Rc<RefCell<Option<PlatformInputHandler>>>;
++thread_local! {
++    static HANDLER: RefCell<Weak<RefCell<Option<PlatformInputHandler>>>> = RefCell::new(Weak::new());
++    static SESSION: RefCell<Session> = RefCell::new(Session::default());
++}
++#[derive(Default)]
++struct Session {
++    focus: Option<FocusId>, id: i64, revision: i64,
++    sent: Option<(String, usize, usize)>,
++}
++pub struct Snapshot {
++    pub session: i64, pub revision: i64, pub text: String,
++    pub start: usize, pub end: usize, pub composing: Option<std::ops::Range<usize>>,
++}
++static PENDING: Mutex<Option<Snapshot>> = Mutex::new(None);
++static INSETS: Mutex<[i32; 4]> = Mutex::new([0; 4]);
++pub static INSETS_DIRTY: AtomicBool = AtomicBool::new(false);
++static BACK_PENDING: AtomicBool = AtomicBool::new(false);
++pub fn request_back() { BACK_PENDING.store(true, Ordering::Release); }
++
++pub fn register(handler: &Handler) { HANDLER.with(|slot| *slot.borrow_mut() = Rc::downgrade(handler)); }
++pub fn enqueue(snapshot: Snapshot) {
++    if snapshot.text.len() <= 1_048_576 { *PENDING.lock().unwrap() = Some(snapshot); }
++}
++pub fn set_insets(value: [i32; 4]) {
++    let mut current = INSETS.lock().unwrap();
++    if *current != value { *current = value; INSETS_DIRTY.store(true, Ordering::Release); }
++}
++pub fn insets() -> [i32; 4] { *INSETS.lock().unwrap() }
++
++pub fn call_void(method: &jni::strings::JNIStr) {
++    let _ = super::jni::with_env(|env| {
++        let activity = super::jni::activity(env)?;
++        env.call_method(&activity, method, jni::jni_sig!("()V"), &[]).map_err(|e| e.to_string())?;
++        Ok(())
++    });
++}
++
++pub fn string_call(method: &jni::strings::JNIStr, text: &str) {
++    let _ = super::jni::with_env(|env| {
++        let activity = super::jni::activity(env)?;
++        let value = env.new_string(text).map_err(|e| e.to_string())?;
++        env.call_method(&activity, method, jni::jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(value.as_ref())])
++            .map_err(|e| e.to_string())?;
++        Ok(())
++    });
++}
++
++/// Called between GPUI updates, so input handler methods may safely update their window.
++pub fn process() {
++    if BACK_PENDING.swap(false, Ordering::AcqRel) {
++        if let Some(window) = super::jni::platform().and_then(|platform| platform.primary_window()) {
++            for action in [0, 1] {
++                window.handle_key_event(super::AndroidKeyEvent { key_code: 4, action, meta_state: 0, unicode_char: 0 });
++            }
++        }
++    }
++    let Some(slot) = HANDLER.with(|slot| slot.borrow().upgrade()) else { return };
++    let Some(mut handler) = slot.borrow_mut().take() else { return };
++    let focused = handler.query_accepts_focused_text_input();
++    SESSION.with(|state| {
++        let mut state = state.borrow_mut();
++        let focus = focused.then(|| handler.focus_id()).flatten();
++        if state.focus != focus {
++            state.focus = focus; state.id += 1; state.revision = 0; state.sent = None;
++        }
++        if !focused { return; }
++        if let Some(edit) = PENDING.lock().unwrap().take() {
++            if edit.session == state.id && edit.revision > state.revision {
++                let length = handler.text_length_utf16().unwrap_or(0);
++                let old = handler.text_for_range(0..length, &mut None).unwrap_or_default();
++                handler.unmark_text();
++                if old != edit.text {
++                    let (range, replacement) = changed_range(&old, &edit.text);
++                    handler.replace_text_in_range(Some(range), &replacement);
++                }
++                let length = edit.text.encode_utf16().count();
++                if let Some(range) = edit.composing.filter(|r| r.start < r.end && r.end <= length) {
++                    let text = String::from_utf16_lossy(&edit.text.encode_utf16().collect::<Vec<_>>()[range.clone()]);
++                    handler.replace_and_mark_text_in_range(Some(range), &text, None);
++                }
++                handler.set_selected_text_range(edit.start.min(edit.end).min(length)..edit.start.max(edit.end).min(length));
++                state.revision = edit.revision;
++            }
++        }
++        let length = handler.text_length_utf16().unwrap_or(0);
++        let text = handler.text_for_range(0..length, &mut None).unwrap_or_default();
++        let Some(selection) = handler.selected_text_range(false) else { return };
++        let start = selection.range.start; let end = selection.range.end;
++        let snapshot = (text, start, end);
++        if state.sent.as_ref() == Some(&snapshot) { return; }
++        let _ = super::jni::with_env(|env| {
++            let activity = super::jni::activity(env)?;
++            let text = env.new_string(&snapshot.0).map_err(|e| e.to_string())?;
++            env.call_method(&activity, jni::jni_str!("gpuiUpdateEditor"), jni::jni_sig!("(JJLjava/lang/String;II)V"), &[
++                JValue::Long(state.id), JValue::Long(state.revision), JValue::Object(text.as_ref()),
++                JValue::Int(start as i32), JValue::Int(end as i32),
++            ]).map_err(|e| e.to_string())?;
++            Ok(())
++        });
++        state.sent = Some(snapshot);
++    });
++    // Repainting while handling a snapshot can register a newer adapter.
++    if slot.borrow().is_none() { *slot.borrow_mut() = Some(handler); }
++}
++
++fn changed_range(old: &str, new: &str) -> (std::ops::Range<usize>, String) {
++    let old: Vec<char> = old.chars().collect(); let new: Vec<char> = new.chars().collect();
++    let prefix = old.iter().zip(&new).take_while(|(a,b)| a == b).count();
++    let suffix = old[prefix..].iter().rev().zip(new[prefix..].iter().rev()).take_while(|(a,b)| a == b).count();
++    let start = old[..prefix].iter().map(|c| c.len_utf16()).sum();
++    let end = old[..old.len()-suffix].iter().map(|c| c.len_utf16()).sum();
++    (start..end, new[prefix..new.len()-suffix].iter().collect())
++}
+diff --git a/src/android/jni.rs b/src/android/jni.rs
+index 634e32f..bda5459 100644
+--- a/src/android/jni.rs
++++ b/src/android/jni.rs
+@@ -330,6 +330,7 @@ pub fn shared_platform() -> Option<SharedPlatform> {
+ const AMOTION_EVENT_ACTION_DOWN: u32 = 0;
+ const AMOTION_EVENT_ACTION_UP: u32 = 1;
+ const AMOTION_EVENT_ACTION_MOVE: u32 = 2;
++const AMOTION_EVENT_ACTION_CANCEL: u32 = 3;
+ 
+ // ── night mode query via NDK Configuration ───────────────────────────────────
+ 
+@@ -449,7 +450,7 @@ fn process_input_events(app: &AndroidApp) {
+                                         AMOTION_EVENT_ACTION_UP
+                                     }
+                                     MotionAction::Move => AMOTION_EVENT_ACTION_MOVE,
+-                                    MotionAction::Cancel => AMOTION_EVENT_ACTION_UP,
++                                    MotionAction::Cancel => AMOTION_EVENT_ACTION_CANCEL,
+                                     _ => continue,
+                                 };
+ 
+@@ -573,12 +574,14 @@ pub fn run_event_loop(app: &AndroidApp) {
+             platform.tick();
+         }
+ 
+-        // ── Poll for events (non-blocking) ──
+-        //
+-        // Non-blocking poll: process any pending events then immediately
+-        // continue to rendering. No sleep — the GPU present call
+-        // (get_current_texture / Mailbox) provides natural frame pacing.
+-        app.poll_events(Some(Duration::ZERO), |event| match event {
++        // GPUI can skip presentation when nothing is dirty. Bound polling so that an
++        // idle or background window does not become a busy loop without GPU pacing.
++        let poll_timeout = if app_is_active {
++            Duration::from_millis(8)
++        } else {
++            Duration::from_millis(100)
++        };
++        app.poll_events(Some(poll_timeout), |event| match event {
+             PollEvent::Main(main_event) => {
+                 handle_main_event(app, main_event);
+             }
+@@ -780,6 +783,8 @@ pub fn run_event_loop(app: &AndroidApp) {
+             }
+         }
+ 
++        super::editor::process();
++
+         // ── Render ──
+         if let Some(platform) = PLATFORM.get() {
+             if INIT_WINDOW_DONE.load(Ordering::Relaxed) && app_is_active {
+@@ -806,6 +811,9 @@ pub fn run_event_loop(app: &AndroidApp) {
+ 
+ /// Pause all platform views when the app goes to background.
+ fn pause_platform_views() {
++    if crate::platform_view::PlatformViewRegistry::global().active_view_count() == 0 {
++        return;
++    }
+     let _ = with_env(|env| {
+         if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
+             let _ = env.call_static_method(
+@@ -822,6 +830,9 @@ fn pause_platform_views() {
+ 
+ /// Resume all platform views when the app returns to foreground.
+ fn resume_platform_views() {
++    if crate::platform_view::PlatformViewRegistry::global().active_view_count() == 0 {
++        return;
++    }
+     let _ = with_env(|env| {
+         if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
+             let _ = env.call_static_method(
+@@ -838,6 +849,9 @@ fn resume_platform_views() {
+ 
+ /// Dispose all platform views during app shutdown.
+ fn dispose_all_platform_views() {
++    if crate::platform_view::PlatformViewRegistry::global().active_view_count() == 0 {
++        return;
++    }
+     let _ = with_env(|env| {
+         if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
+             let _ = env.call_static_method(
+diff --git a/src/android/mod.rs b/src/android/mod.rs
+index f381d88..83dea88 100644
+--- a/src/android/mod.rs
++++ b/src/android/mod.rs
+@@ -152,6 +152,7 @@ pub fn size<T>(width: T, height: T) -> Size<T> {
+ pub mod dispatcher;
+ pub mod display;
+ pub mod jni;
++pub mod editor;
+ pub mod keyboard;
+ pub mod platform;
+ pub mod platform_view;
+diff --git a/src/android/platform.rs b/src/android/platform.rs
+index e774ed2..aad6064 100644
+--- a/src/android/platform.rs
++++ b/src/android/platform.rs
+@@ -45,6 +45,7 @@ use parking_lot::Mutex;
+ use std::{
+     cell::RefCell,
+     collections::HashMap,
++    ffi::OsString,
+     path::{Path, PathBuf},
+     rc::Rc,
+     sync::{
+@@ -146,7 +147,7 @@ struct AndroidPlatformState {
+     finish_launching: Option<Box<dyn FnOnce() + Send>>,
+ 
+     /// Called when the app is about to quit.
+-    quit_callback: Option<Box<dyn FnMut() + Send>>,
++    quit_callback: Option<Box<dyn FnMut() -> bool + Send>>,
+ 
+     /// Called when the app is re-opened (e.g. tapped in the recents screen
+     /// while already running).
+@@ -303,7 +304,12 @@ impl AndroidPlatform {
+                 "/system/fonts/NotoSans-BoldItalic.ttf",
+                 "/system/fonts/NotoSansCJK-Regular.ttc",
+                 "/system/fonts/NotoSansDevanagari-Regular.otf",
++                "/system/fonts/NotoSansDevanagari-VF.ttf",
++                "/system/fonts/NotoSansBengali-VF.ttf",
++                "/system/fonts/NotoSansBengaliUI-VF.ttf",
++                "/system/fonts/NotoSansBengali-Regular.ttf",
+                 "/system/fonts/NotoSansArabic-Regular.ttf",
++                "/system/fonts/NotoNaskhArabic-Regular.ttf",
+                 "/system/fonts/NotoSansHebrew-Regular.ttf",
+                 "/system/fonts/NotoSansThai-Regular.ttf",
+                 // Emoji fonts — loaded so glyphs like 🦀 ✅ ❤️ render.
+@@ -335,10 +341,10 @@ impl AndroidPlatform {
+             // outlines, but NOT COLR v1 (used by Android 13+ / API 33+).
+             // If the system font lacks CBDT tables we load a bundled
+             // CBDT-based NotoColorEmoji from the APK assets instead.
+-            let system_emoji_path = "/system/fonts/NotoColorEmoji.ttf";
+             let mut emoji_loaded = false;
+ 
+-            if let Ok(system_emoji_bytes) = std::fs::read(system_emoji_path) {
++            for system_emoji_path in ["/system/fonts/NotoColorEmoji.ttf", "/system/fonts/NotoColorEmojiLegacy.ttf"] {
++              if let Ok(system_emoji_bytes) = std::fs::read(system_emoji_path) {
+                 if font_has_cbdt_tables(&system_emoji_bytes) {
+                     log::info!(
+                         "system emoji font has CBDT tables — using it ({} bytes)",
+@@ -346,11 +352,13 @@ impl AndroidPlatform {
+                     );
+                     font_data.push(std::borrow::Cow::Owned(system_emoji_bytes));
+                     emoji_loaded = true;
++                    break;
+                 } else {
+                     log::info!(
+                         "system emoji font is COLR v1 (no CBDT) — will try bundled fallback"
+                     );
+                 }
++              }
+             }
+ 
+             if !emoji_loaded {
+@@ -515,17 +523,12 @@ impl AndroidPlatform {
+     /// Invokes the registered quit callback before returning.
+     pub fn quit(&self) {
+         log::info!("AndroidPlatform::quit");
+-        self.should_quit.store(true, Ordering::SeqCst);
+-
+-        let cb = self.state.lock().quit_callback.as_mut().map(|cb| {
+-            // We cannot move out of an `&mut FnMut`, so we call it in place.
+-            cb as *mut Box<dyn FnMut() + Send>
+-        });
+-
+-        if let Some(cb_ptr) = cb {
+-            // SAFETY: The pointer is valid for the duration of this call
+-            // because we hold the lock-guard's lifetime indirectly.
+-            unsafe { (*cb_ptr)() };
++        // GPUI's callback may re-enter the platform, so invoke it without the state lock.
++        let mut callback = self.state.lock().quit_callback.take();
++        let should_quit = callback.as_mut().map(|callback| callback()).unwrap_or(true);
++        self.state.lock().quit_callback = callback;
++        if should_quit {
++            self.should_quit.store(true, Ordering::SeqCst);
+         }
+     }
+ 
+@@ -895,7 +898,7 @@ impl AndroidPlatform {
+     /// Register a callback invoked when the app is about to quit.
+     pub fn on_quit<F>(&self, cb: F)
+     where
+-        F: FnMut() + Send + 'static,
++        F: FnMut() -> bool + Send + 'static,
+     {
+         self.state.lock().quit_callback = Some(Box::new(cb));
+     }
+@@ -951,6 +954,20 @@ impl AndroidPlatform {
+ // file pickers, etc.) are no-ops or return sensible defaults.
+ 
+ impl Platform for AndroidPlatform {
++    fn hide_cursor_until_mouse_moves(&self) {}
++    fn is_cursor_visible(&self) -> bool {
++        false
++    }
++    fn prevent_idle_sleep(&self, _reason: &str) -> Task<Result<gpui::ActivityGuard>> {
++        Task::ready(Err(anyhow::anyhow!(
++            "Sleep inhibition is outside the Android spike"
++        )))
++    }
++
++    fn on_displays_changed(&self, _callback: Box<dyn FnMut()>) {}
++    fn on_system_sleep(&self, _callback: Box<dyn FnMut()>) {}
++    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
++
+     fn background_executor(&self) -> BackgroundExecutor {
+         let dispatcher: Arc<dyn gpui::PlatformDispatcher> = self.state.lock().dispatcher.clone();
+         BackgroundExecutor::new(dispatcher)
+@@ -975,24 +992,10 @@ impl Platform for AndroidPlatform {
+     }
+ 
+     fn quit(&self) {
+-        log::info!("AndroidPlatform::quit");
+-        self.should_quit.store(true, Ordering::SeqCst);
+-
+-        let cb = self
+-            .state
+-            .lock()
+-            .quit_callback
+-            .as_mut()
+-            .map(|cb| cb as *mut Box<dyn FnMut() + Send>);
+-
+-        if let Some(cb_ptr) = cb {
+-            // SAFETY: pointer is valid for the duration of this call because
+-            // we hold the lock-guard's lifetime indirectly.
+-            unsafe { (*cb_ptr)() };
+-        }
++        AndroidPlatform::quit(self);
+     }
+ 
+-    fn restart(&self, _binary_path: Option<PathBuf>) {
++    fn restart(&self, _binary_path: Option<PathBuf>, _arguments: Vec<OsString>) {
+         log::warn!("AndroidPlatform::restart — not supported on Android");
+     }
+ 
+@@ -1071,9 +1074,7 @@ impl Platform for AndroidPlatform {
+     }
+ 
+     fn open_url(&self, url: &str) {
+-        // A full implementation would call startActivity with an ACTION_VIEW
+-        // Intent via JNI.  For now, log the request.
+-        log::info!("AndroidPlatform::open_url({url}) — Intent launch not yet implemented");
++        super::editor::string_call(jni::jni_str!("gpuiOpenUrl"), url);
+     }
+ 
+     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
+@@ -1122,9 +1123,11 @@ impl Platform for AndroidPlatform {
+         log::info!("AndroidPlatform::open_with_system — Intent launch not yet implemented");
+     }
+ 
+-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
++    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+         self.state.lock().quit_callback = Some(unsafe {
+-            std::mem::transmute::<Box<dyn FnMut()>, Box<dyn FnMut() + Send>>(callback)
++            std::mem::transmute::<Box<dyn FnMut() -> bool>, Box<dyn FnMut() -> bool + Send>>(
++                callback,
++            )
+         });
+     }
+ 
+@@ -1188,18 +1191,16 @@ impl Platform for AndroidPlatform {
+     }
+ 
+     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
+-        self.state
+-            .lock()
+-            .clipboard
+-            .read()
+-            .map(ClipboardItem::new_string)
++        super::jni::with_env(|env| {
++            let activity = super::jni::activity(env)?;
++            let value = env.call_method(&activity, jni::jni_str!("gpuiClipboardRead"), jni::jni_sig!("()Ljava/lang/String;"), &[])
++                .map_err(|e| e.to_string())?.l().map_err(|e| e.to_string())?;
++            Ok(ClipboardItem::new_string(super::jni::get_string(env, &value)))
++        }).ok()
+     }
+ 
+     fn write_to_clipboard(&self, item: ClipboardItem) {
+-        self.state
+-            .lock()
+-            .clipboard
+-            .write(item.text().unwrap_or_default());
++        super::editor::string_call(jni::jni_str!("gpuiClipboardWrite"), &item.text().unwrap_or_default());
+     }
+ 
+     fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {
+@@ -1292,6 +1293,26 @@ impl SharedPlatform {
+ /// so the compiler never accidentally picks the inherent method (which may
+ /// have a different return type).
+ impl Platform for SharedPlatform {
++    fn hide_cursor_until_mouse_moves(&self) {
++        <AndroidPlatform as Platform>::hide_cursor_until_mouse_moves(&self.0)
++    }
++    fn is_cursor_visible(&self) -> bool {
++        <AndroidPlatform as Platform>::is_cursor_visible(&self.0)
++    }
++    fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<gpui::ActivityGuard>> {
++        <AndroidPlatform as Platform>::prevent_idle_sleep(&self.0, reason)
++    }
++
++    fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
++        <AndroidPlatform as Platform>::on_displays_changed(&self.0, callback)
++    }
++    fn on_system_sleep(&self, callback: Box<dyn FnMut()>) {
++        <AndroidPlatform as Platform>::on_system_sleep(&self.0, callback)
++    }
++    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
++        <AndroidPlatform as Platform>::on_system_wake(&self.0, callback)
++    }
++
+     fn background_executor(&self) -> BackgroundExecutor {
+         <AndroidPlatform as Platform>::background_executor(&self.0)
+     }
+@@ -1307,8 +1328,8 @@ impl Platform for SharedPlatform {
+     fn quit(&self) {
+         <AndroidPlatform as Platform>::quit(&self.0)
+     }
+-    fn restart(&self, binary_path: Option<PathBuf>) {
+-        <AndroidPlatform as Platform>::restart(&self.0, binary_path)
++    fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<OsString>) {
++        <AndroidPlatform as Platform>::restart(&self.0, binary_path, arguments)
+     }
+     fn activate(&self, ignoring_other_apps: bool) {
+         <AndroidPlatform as Platform>::activate(&self.0, ignoring_other_apps)
+@@ -1372,7 +1393,7 @@ impl Platform for SharedPlatform {
+     fn open_with_system(&self, path: &Path) {
+         <AndroidPlatform as Platform>::open_with_system(&self.0, path)
+     }
+-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
++    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+         <AndroidPlatform as Platform>::on_quit(&self.0, callback)
+     }
+     fn on_reopen(&self, callback: Box<dyn FnMut()>) {
+@@ -1491,6 +1512,7 @@ mod tests {
+         let f2 = fired.clone();
+         p.on_quit(move || {
+             f2.store(true, Ordering::Relaxed);
++            true
+         });
+         p.quit();
+         assert!(fired.load(Ordering::Relaxed));
+diff --git a/src/android/window.rs b/src/android/window.rs
+index 897300d..4b3f762 100644
+--- a/src/android/window.rs
++++ b/src/android/window.rs
+@@ -53,7 +53,6 @@ use std::rc::Rc;
+ use std::sync::{Arc, OnceLock};
+ 
+ use super::{AndroidKeyEvent, Bounds, DevicePixels, Pixels, Point, Size, TouchPoint};
+-use crate::momentum::{MomentumScroller, VelocityTracker};
+ 
+ /// Lightweight, owned window handle for wgpu surface creation.
+ /// Stores the raw ANativeWindow pointer and implements the traits
+@@ -90,39 +89,6 @@ impl HasDisplayHandle for RawAndroidWindow {
+     }
+ }
+ 
+-/// Shared momentum scrolling state, accessible from both the touch callback
+-/// (which starts/cancels flings and records velocity samples) and the
+-/// request-frame callback (which pumps the decelerating animation).
+-///
+-/// ## Coalesced scroll deltas
+-///
+-/// Android can deliver many `ACTION_MOVE` events between frames.  Instead of
+-/// dispatching a `ScrollWheel` event for every single move (which triggers a
+-/// full GPUI layout+paint each time), the touch callback **accumulates** the
+-/// delta into `pending_scroll_dx/dy`.  The `on_request_frame` callback then
+-/// drains the accumulated delta and emits a single `ScrollWheel` event per
+-/// frame.  This dramatically reduces the number of layout passes during a
+-/// drag and eliminates the "laggy" feeling on complex screens.
+-struct MomentumState {
+-    velocity_tracker: VelocityTracker,
+-    scroller: MomentumScroller,
+-
+-    // ── Coalesced scroll state ───────────────────────────────────────────
+-    /// Accumulated scroll delta (logical px) from touch MOVE events since
+-    /// the last frame.  Drained by the frame callback.
+-    pending_scroll_dx: f32,
+-    pending_scroll_dy: f32,
+-    /// The most recent touch position (logical px) for the coalesced event.
+-    /// Updated on every MOVE so the ScrollWheel `position` field is correct.
+-    pending_scroll_pos_x: f32,
+-    pending_scroll_pos_y: f32,
+-    /// Whether there is a pending scroll delta to emit.
+-    has_pending_scroll: bool,
+-    /// The touch phase for the pending scroll event (Started for the first
+-    /// coalesced batch, Moved for subsequent ones).
+-    pending_scroll_phase: gpui::TouchPhase,
+-}
+-
+ // Re-export for use with raw-window-handle and the frame-rate helper.
+ use ndk::native_window::NativeWindow;
+ 
+@@ -942,7 +908,10 @@ impl AndroidWindow {
+     /// Returns GPU specs from the renderer, if available.
+     pub fn gpu_specs(&self) -> Option<GpuSpecs> {
+         let state = self.state.lock();
+-        state.renderer.as_ref().map(|r| r.gpu_specs())
++        state
++            .renderer
++            .as_ref()
++            .and_then(|renderer| renderer.gpu_specs())
+     }
+ 
+     /// Whether the window is currently active / visible.
+@@ -1089,40 +1058,20 @@ impl Drop for AndroidWindow {
+ pub struct AndroidPlatformWindow {
+     window: Arc<AndroidWindow>,
+     display: Option<Rc<dyn PlatformDisplay>>,
+-    input_handler: Option<PlatformInputHandler>,
++    input_handler: Rc<RefCell<Option<PlatformInputHandler>>>,
+     title: String,
+-    /// Shared momentum scrolling state — used by both the touch callback
+-    /// (to start/cancel flings) and the frame callback (to pump inertia).
+-    momentum: Arc<Mutex<MomentumState>>,
+-    /// Shared reference to the GPUI input callback, so the frame callback can
+-    /// emit synthetic momentum ScrollWheel events.  Initialised to a no-op;
+-    /// replaced when `on_input` is called.
+-    momentum_input_cb:
+-        Arc<Mutex<Box<dyn FnMut(gpui::PlatformInput) -> DispatchEventResult + Send>>>,
+ }
+ 
+ impl AndroidPlatformWindow {
+     /// Create a new `AndroidPlatformWindow` wrapping an existing `AndroidWindow`.
+     pub fn new(window: Arc<AndroidWindow>, display: Option<Rc<dyn PlatformDisplay>>) -> Self {
+-        // No-op input callback used until on_input is called.
+-        let noop_input_cb: Box<dyn FnMut(gpui::PlatformInput) -> DispatchEventResult + Send> =
+-            Box::new(|_| DispatchEventResult::default());
++        let input_handler = Rc::new(RefCell::new(None));
++        super::editor::register(&input_handler);
+         Self {
+             window,
+             display,
+-            input_handler: None,
++            input_handler,
+             title: String::new(),
+-            momentum: Arc::new(Mutex::new(MomentumState {
+-                velocity_tracker: VelocityTracker::new(),
+-                scroller: MomentumScroller::new(),
+-                pending_scroll_dx: 0.0,
+-                pending_scroll_dy: 0.0,
+-                pending_scroll_pos_x: 0.0,
+-                pending_scroll_pos_y: 0.0,
+-                has_pending_scroll: false,
+-                pending_scroll_phase: gpui::TouchPhase::Moved,
+-            })),
+-            momentum_input_cb: Arc::new(Mutex::new(noop_input_cb)),
+         }
+     }
+ 
+@@ -1163,6 +1112,16 @@ impl HasDisplayHandle for AndroidPlatformWindow {
+ }
+ 
+ impl PlatformWindow for AndroidPlatformWindow {
++    fn visibility(&self) -> gpui::WindowVisibility {
++        if self.window.is_active() {
++            gpui::WindowVisibility::Visible
++        } else {
++            gpui::WindowVisibility::Hidden
++        }
++    }
++    fn on_visibility_change(&self, _callback: Box<dyn FnMut(gpui::WindowVisibility)>) {}
++    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
++
+     fn bounds(&self) -> gpui::Bounds<gpui::Pixels> {
+         let state = self.window.state.lock();
+         let w = state.width as f32 / state.scale_factor;
+@@ -1226,11 +1185,23 @@ impl PlatformWindow for AndroidPlatformWindow {
+     }
+ 
+     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
+-        self.input_handler = Some(input_handler);
++        *self.input_handler.borrow_mut() = Some(input_handler);
+     }
+ 
+     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
+-        self.input_handler.take()
++        self.input_handler.borrow_mut().take()
++    }
++
++    fn show_soft_keyboard(&self) { super::editor::call_void(jni::jni_str!("gpuiShowKeyboard")); }
++    fn hide_soft_keyboard(&self) { super::editor::call_void(jni::jni_str!("gpuiHideKeyboard")); }
++    fn insets(&self) -> gpui::WindowInsets {
++        let [top, right, bottom, left] = super::editor::insets();
++        let scale = self.window.scale_factor();
++        gpui::WindowInsets {
++            safe_area: gpui::Edges { top: gpui::px(top as f32 / scale), right: gpui::px(right as f32 / scale),
++                bottom: gpui::px(bottom as f32 / scale), left: gpui::px(left as f32 / scale) },
++            ..Default::default()
++        }
+     }
+ 
+     fn prompt(
+@@ -1291,137 +1262,19 @@ impl PlatformWindow for AndroidPlatformWindow {
+     }
+ 
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
+-        // PlatformWindow gives us Box<dyn FnMut(...)> (not Send).
+-        // AndroidWindow::on_request_frame requires Send.  On Android the
+-        // request-frame callback is always invoked on the main thread, so
+-        // this transmute is safe in practice.
+-        let send_callback: Box<dyn FnMut(RequestFrameOptions) + Send> =
++        // All callbacks execute on the native event thread, as in the upstream bridge.
++        let callback: Box<dyn FnMut(RequestFrameOptions) + Send> =
+             unsafe { std::mem::transmute(callback) };
+-        let send_callback = Mutex::new(send_callback);
+-
+-        // Also capture the input callback so we can emit momentum scroll
+-        // events before the GPUI render pass.  The input_callback is stored
+-        // as an Arc<Mutex<…>> by on_input — we clone the same Arc here.
+-        //
+-        // We need a reference to the shared momentum state and the shared
+-        // input callback so that the frame callback can pump inertia.
+-        let momentum = Arc::clone(&self.momentum);
+-        // The input_cb Arc is set up by on_input.  We store a clone of it
+-        // on the struct so on_request_frame can capture it.
+-        let input_cb = Arc::clone(&self.momentum_input_cb);
+-
++        let callback = Mutex::new(callback);
+         self.window.on_request_frame(move || {
+-            // ── Drain coalesced touch-scroll deltas ──────────────────
+-            // The touch callback accumulates scroll deltas into
+-            // MomentumState rather than emitting ScrollWheel events
+-            // immediately.  We drain the accumulated delta here,
+-            // emitting at most ONE ScrollWheel event per frame.
+-            // This avoids redundant layout passes when Android
+-            // delivers many MOVE events between frames.
+-            {
+-                let mut ms = momentum.lock();
+-
+-                if ms.has_pending_scroll {
+-                    let dx = ms.pending_scroll_dx;
+-                    let dy = ms.pending_scroll_dy;
+-                    let pos_x = ms.pending_scroll_pos_x;
+-                    let pos_y = ms.pending_scroll_pos_y;
+-                    let phase = ms.pending_scroll_phase;
+-
+-                    // Reset the accumulator.
+-                    ms.pending_scroll_dx = 0.0;
+-                    ms.pending_scroll_dy = 0.0;
+-                    ms.has_pending_scroll = false;
+-
+-                    // Drop the lock before calling the input callback
+-                    // to avoid holding it during GPUI dispatch.
+-                    drop(ms);
+-
+-                    let position = gpui::point(gpui::px(pos_x), gpui::px(pos_y));
+-                    if let Some(mut guard) = input_cb.try_lock() {
+-                        let _ = guard(gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+-                            position,
+-                            delta: gpui::ScrollDelta::Pixels(gpui::point(
+-                                gpui::px(dx),
+-                                gpui::px(dy),
+-                            )),
+-                            modifiers: gpui::Modifiers::default(),
+-                            touch_phase: phase,
+-                        }));
+-                    }
+-                } else if ms.scroller.is_active() {
+-                    // ── Momentum scrolling pump ──────────────────────
+-                    // No active touch drag — pump the momentum scroller.
+-                    if let Some(delta) = ms.scroller.step() {
+-                        let position =
+-                            gpui::point(gpui::px(delta.position_x), gpui::px(delta.position_y));
+-                        let fling_ended = !ms.scroller.is_active();
+-
+-                        // Drop the lock before calling the input callback.
+-                        drop(ms);
+-
+-                        if let Some(mut guard) = input_cb.try_lock() {
+-                            let _ =
+-                                guard(gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+-                                    position,
+-                                    delta: gpui::ScrollDelta::Pixels(gpui::point(
+-                                        gpui::px(delta.dx),
+-                                        gpui::px(delta.dy),
+-                                    )),
+-                                    modifiers: gpui::Modifiers::default(),
+-                                    touch_phase: gpui::TouchPhase::Moved,
+-                                }));
+-
+-                            // If this was the last momentum frame (scroller
+-                            // deactivated during step), send the Ended event
+-                            // now so GPUI knows the gesture is complete.
+-                            if fling_ended {
+-                                let _ = guard(gpui::PlatformInput::ScrollWheel(
+-                                    gpui::ScrollWheelEvent {
+-                                        position,
+-                                        delta: gpui::ScrollDelta::Pixels(gpui::point(
+-                                            gpui::px(0.0),
+-                                            gpui::px(0.0),
+-                                        )),
+-                                        modifiers: gpui::Modifiers::default(),
+-                                        touch_phase: gpui::TouchPhase::Ended,
+-                                    },
+-                                ));
+-                            }
+-                        }
+-                    } else {
+-                        // Fling finished — emit a zero-delta Ended event.
+-                        let pos = gpui::point(
+-                            gpui::px(ms.scroller.position_x()),
+-                            gpui::px(ms.scroller.position_y()),
+-                        );
+-                        drop(ms);
+-
+-                        if let Some(mut guard) = input_cb.try_lock() {
+-                            let _ =
+-                                guard(gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+-                                    position: pos,
+-                                    delta: gpui::ScrollDelta::Pixels(gpui::point(
+-                                        gpui::px(0.0),
+-                                        gpui::px(0.0),
+-                                    )),
+-                                    modifiers: gpui::Modifiers::default(),
+-                                    touch_phase: gpui::TouchPhase::Ended,
+-                                }));
+-                        }
+-                    }
+-                }
+-            }
+-
+-            // Check if text input arrived since last frame — if so, force a
+-            // render so drain_pending_text() runs and the UI updates.
+             let text_dirty =
+-                crate::TEXT_INPUT_DIRTY.swap(false, std::sync::atomic::Ordering::AcqRel);
+-
+-            let mut cb = send_callback.lock();
+-            cb(RequestFrameOptions {
+-                require_presentation: true,
++                crate::TEXT_INPUT_DIRTY.swap(false, std::sync::atomic::Ordering::AcqRel)
++                | super::editor::INSETS_DIRTY.swap(false, std::sync::atomic::Ordering::AcqRel);
++            callback.lock()(RequestFrameOptions {
++                require_presentation: false,
+                 force_render: text_dirty,
++                signal_source: gpui::FrameRequestSource::LocalSchedule,
++                ..Default::default()
+             });
+         });
+     }
+@@ -1437,252 +1290,53 @@ impl PlatformWindow for AndroidPlatformWindow {
+             unsafe { std::mem::transmute(callback) };
+         let input_cb = Arc::new(Mutex::new(send_callback));
+ 
+-        // Store a clone for the momentum pump in on_request_frame.
+-        *self.momentum_input_cb.lock() = {
+-            let cb = Arc::clone(&input_cb);
+-            Box::new(move |input: gpui::PlatformInput| -> DispatchEventResult { cb.lock()(input) })
+-        };
+-
+-        // ── Touch events → PlatformInput ─────────────────────────────────
+-        //
+-        // Android touch events must be translated into both mouse events
+-        // (for taps / clicks) and scroll-wheel events (for drag-to-scroll).
+-        //
+-        // A small state machine distinguishes the two gestures:
+-        //
+-        //   DOWN  → record start position, enter "pending" state
+-        //   MOVE  → if finger moved > threshold → switch to "scrolling",
+-        //           cancel the mouse-down, emit ScrollWheel deltas
+-        //   UP    → if still "pending" → emit MouseDown + MouseUp (tap)
+-        //           if "scrolling"   → emit final ScrollWheel (Ended) +
+-        //           start momentum fling
+-        //
+-        // The threshold is in logical pixels (~8 px ≈ ~3 mm at 160 dpi).
++        // Match the pinned iOS backend: deliver raw contacts to GPUI's gesture arena.
++        // Android reuses pointer IDs; allocate a fresh GPUI ID for each contact lifetime.
+         {
+-            let cb = Arc::clone(&input_cb);
+-            let scale_factor = self.window.scale_factor();
+-            let momentum = Arc::clone(&self.momentum);
+-
+-            /// Distance (logical px) the finger must travel before a touch
+-            /// is promoted from a potential tap to a scroll gesture.
+-            const SCROLL_SLOP: f32 = 8.0;
+-
+-            /// Tracks the current touch gesture.
+-            #[derive(Clone, Copy, Debug)]
+-            enum TouchState {
+-                /// No active touch.
+-                Idle,
+-                /// Finger is down but hasn't moved beyond the slop threshold.
+-                Pending { start_x: f32, start_y: f32 },
+-                /// Finger has moved beyond the threshold — we are scrolling.
+-                Scrolling { prev_x: f32, prev_y: f32 },
+-            }
+-
+-            let state = Mutex::new(TouchState::Idle);
+-
++            let callback = Arc::clone(&input_cb);
++            let window = Arc::downgrade(&self.window);
++            let contacts = Mutex::new((
++                0_u64,
++                std::collections::HashMap::<i32, gpui::TouchId>::new(),
++            ));
+             self.window.on_touch(move |touch| {
+-                // Android delivers touch coordinates in physical (device)
+-                // pixels, but GPUI performs layout and hit-testing in logical
+-                // pixels.  Divide by scale factor.
+-                let logical_x = touch.x / scale_factor;
+-                let logical_y = touch.y / scale_factor;
+-                let modifiers = gpui::Modifiers::default();
+-
+-                let mut ts = state.lock();
+-
+-                match touch.action {
+-                    // ── ACTION_DOWN ──────────────────────────────────────
+-                    0 => {
+-                        // Cancel any active momentum fling — the user
+-                        // touched the screen, so inertia must stop.
+-                        // Also flush any pending coalesced scroll.
+-                        {
+-                            let mut ms = momentum.lock();
+-                            ms.scroller.cancel();
+-                            ms.velocity_tracker.reset();
+-                            ms.pending_scroll_dx = 0.0;
+-                            ms.pending_scroll_dy = 0.0;
+-                            ms.has_pending_scroll = false;
+-                        }
+-                        *ts = TouchState::Pending {
+-                            start_x: logical_x,
+-                            start_y: logical_y,
+-                        };
+-                        // Do NOT emit MouseDown here — wait until we know
+-                        // whether this is a tap or a scroll.  Emitting
+-                        // MouseDown immediately causes accidental navigation
+-                        // when the user starts scrolling near a button/tab.
+-                        //
+-                        // - Tap (finger lifts within slop) → emit MouseDown +
+-                        //   MouseUp together in ACTION_UP.
+-                        // - Scroll (finger exceeds slop) → emit only
+-                        //   MouseMove + ScrollWheel, no MouseDown.
+-                    }
+-
+-                    // ── ACTION_MOVE ──────────────────────────────────────
+-                    2 => {
+-                        // Instead of emitting a ScrollWheel event for every
+-                        // single MOVE, accumulate the delta in MomentumState.
+-                        // The frame callback will drain and emit one coalesced
+-                        // ScrollWheel per frame.  This is the key optimisation
+-                        // that prevents N layout passes per frame during a drag.
+-                        //
+-                        // We DO emit MouseMove immediately for every MOVE so
+-                        // that interactive screens (Animations drag line,
+-                        // Shaders touch position) update in real time.
+-                        let mut ms = momentum.lock();
+-
+-                        // Record every move for velocity estimation.
+-                        ms.velocity_tracker.record(logical_x, logical_y);
+-
+-                        match *ts {
+-                            TouchState::Pending { start_x, start_y } => {
+-                                let dx = logical_x - start_x;
+-                                let dy = logical_y - start_y;
+-                                let distance = (dx * dx + dy * dy).sqrt();
+-
+-                                if distance > SCROLL_SLOP {
+-                                    // Promote to scrolling — accumulate the
+-                                    // first scroll delta from the start pos.
+-                                    *ts = TouchState::Scrolling {
+-                                        prev_x: logical_x,
+-                                        prev_y: logical_y,
+-                                    };
+-                                    ms.pending_scroll_dx += dx;
+-                                    ms.pending_scroll_dy += dy;
+-                                    ms.pending_scroll_pos_x = logical_x;
+-                                    ms.pending_scroll_pos_y = logical_y;
+-                                    // Use Started phase for the first batch.
+-                                    if !ms.has_pending_scroll {
+-                                        ms.pending_scroll_phase = gpui::TouchPhase::Started;
+-                                    }
+-                                    ms.has_pending_scroll = true;
+-                                }
+-                                // else: still within slop, stay Pending
+-                            }
+-                            TouchState::Scrolling { prev_x, prev_y } => {
+-                                let dx = logical_x - prev_x;
+-                                let dy = logical_y - prev_y;
+-                                *ts = TouchState::Scrolling {
+-                                    prev_x: logical_x,
+-                                    prev_y: logical_y,
+-                                };
+-                                ms.pending_scroll_dx += dx;
+-                                ms.pending_scroll_dy += dy;
+-                                ms.pending_scroll_pos_x = logical_x;
+-                                ms.pending_scroll_pos_y = logical_y;
+-                                if !ms.has_pending_scroll {
+-                                    ms.pending_scroll_phase = gpui::TouchPhase::Moved;
+-                                }
+-                                ms.has_pending_scroll = true;
+-                            }
+-                            TouchState::Idle => {
+-                                // Spurious move without a preceding down — ignore.
+-                            }
+-                        }
+-
+-                        // Drop momentum lock before dispatching MouseMove.
+-                        drop(ms);
+-
+-                        // Always emit MouseMove so interactive screens can
+-                        // track finger position (drag line in Animations,
+-                        // gradient control in Shaders).
+-                        let position = gpui::point(gpui::px(logical_x), gpui::px(logical_y));
+-                        let mut guard = cb.lock();
+-                        let _ = guard(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+-                            position,
+-                            modifiers,
+-                            pressed_button: Some(gpui::MouseButton::Left),
+-                        }));
+-                    }
+-
+-                    // ── ACTION_UP / ACTION_CANCEL ────────────────────────
+-                    1 | 3 => {
+-                        let position = gpui::point(gpui::px(logical_x), gpui::px(logical_y));
+-
+-                        match *ts {
+-                            TouchState::Pending { start_x, start_y } => {
+-                                // Finger lifted without exceeding slop →
+-                                // this is a tap.  Emit MouseDown + MouseUp
+-                                // together at the original down position so
+-                                // hit-testing matches the initial touch point.
+-                                {
+-                                    let mut ms = momentum.lock();
+-                                    ms.velocity_tracker.reset();
+-                                    ms.has_pending_scroll = false;
+-                                }
+-                                let tap_pos = gpui::point(gpui::px(start_x), gpui::px(start_y));
+-                                let mut guard = cb.lock();
+-                                let _ =
+-                                    guard(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+-                                        button: gpui::MouseButton::Left,
+-                                        position: tap_pos,
+-                                        modifiers,
+-                                        click_count: 1,
+-                                        first_mouse: false,
+-                                    }));
+-                                let _ = guard(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+-                                    button: gpui::MouseButton::Left,
+-                                    position: tap_pos,
+-                                    modifiers,
+-                                    click_count: 1,
+-                                }));
+-                            }
+-                            TouchState::Scrolling { prev_x, prev_y } => {
+-                                // End the active touch-scroll gesture.
+-                                // Include the final delta in the coalesced
+-                                // accumulator, then flush it immediately
+-                                // as an Ended event so the momentum fling
+-                                // starts cleanly.
+-                                let dx = logical_x - prev_x;
+-                                let dy = logical_y - prev_y;
+-                                let mut ms = momentum.lock();
+-
+-                                // Flush any accumulated delta + this final
+-                                // move as a single Ended scroll event.
+-                                let total_dx = ms.pending_scroll_dx + dx;
+-                                let total_dy = ms.pending_scroll_dy + dy;
+-                                ms.pending_scroll_dx = 0.0;
+-                                ms.pending_scroll_dy = 0.0;
+-                                ms.has_pending_scroll = false;
+-
+-                                // Compute release velocity and start fling.
+-                                let (vx, vy) = ms.velocity_tracker.velocity();
+-                                ms.velocity_tracker.reset();
+-                                ms.scroller.fling(vx, vy, logical_x, logical_y);
+-
+-                                // Drop momentum lock before dispatching.
+-                                drop(ms);
+-
+-                                let mut guard = cb.lock();
+-                                // ScrollWheel Ended for scroll containers.
+-                                let _ = guard(gpui::PlatformInput::ScrollWheel(
+-                                    gpui::ScrollWheelEvent {
+-                                        position,
+-                                        delta: gpui::ScrollDelta::Pixels(gpui::point(
+-                                            gpui::px(total_dx),
+-                                            gpui::px(total_dy),
+-                                        )),
+-                                        modifiers,
+-                                        touch_phase: gpui::TouchPhase::Ended,
+-                                    },
+-                                ));
+-                                // MouseUp for interactive screens (Animations
+-                                // drag-to-throw, Shaders touch release).
+-                                let _ = guard(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+-                                    button: gpui::MouseButton::Left,
+-                                    position,
+-                                    modifiers,
+-                                    click_count: 1,
+-                                }));
+-                            }
+-                            TouchState::Idle => {}
+-                        }
+-                        *ts = TouchState::Idle;
+-                    }
+-
+-                    _ => {} // Unknown action, ignore
++                let Some(window) = window.upgrade() else {
++                    return;
++                };
++                let mut contacts = contacts.lock();
++                let phase = match touch.action {
++                    0 => gpui::TouchPhase::Started,
++                    1 => gpui::TouchPhase::Ended,
++                    2 => gpui::TouchPhase::Moved,
++                    3 => gpui::TouchPhase::Cancelled,
++                    _ => return,
++                };
++                let id = if phase == gpui::TouchPhase::Started {
++                    contacts.0 += 1;
++                    let id = gpui::TouchId(contacts.0);
++                    contacts.1.insert(touch.id, id);
++                    id
++                } else {
++                    let Some(id) = contacts.1.get(&touch.id).copied() else {
++                        return;
++                    };
++                    id
++                };
++                if matches!(phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
++                    contacts.1.remove(&touch.id);
+                 }
++                drop(contacts);
++                let scale = window.scale_factor();
++                if phase != gpui::TouchPhase::Moved {
++                    log::info!("GPUI_RAW_TOUCH id={} phase={:?}", id.0, phase);
++                }
++                callback.lock()(gpui::PlatformInput::Touch(gpui::TouchEvent {
++                    id,
++                    phase,
++                    position: gpui::point(gpui::px(touch.x / scale), gpui::px(touch.y / scale)),
++                    predicted_position: None,
++                    force: None,
++                }));
+             });
+         }
+ 
+@@ -1825,10 +1479,6 @@ impl PlatformWindow for AndroidPlatformWindow {
+         self.window.draw(scene);
+     }
+ 
+-    fn completed_frame(&self) {
+-        // No-op — frame completion is handled by wgpu's present.
+-    }
+-
+     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+         self.window
+             .sprite_atlas()
+@@ -1997,14 +1647,14 @@ impl FallbackAtlas {
+ impl PlatformAtlas for FallbackAtlas {
+     fn get_or_insert_with<'a>(
+         &self,
+-        key: &AtlasKey,
++        key: AtlasKey,
+         build: &mut dyn FnMut() -> anyhow::Result<
+             Option<(gpui::Size<gpui::DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
+         >,
+     ) -> anyhow::Result<Option<AtlasTile>> {
+         let mut state = self.state.lock();
+ 
+-        if let Some(tile) = state.tiles.get(key) {
++        if let Some(tile) = state.tiles.get(&key) {
+             return Ok(Some(tile.clone()));
+         }
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 3ac7fc7..a72209a 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -71,6 +71,7 @@ pub use gpui;
+ 
+ // ── shared modules ───────────────────────────────────────────────────────────
+ 
++#[cfg(feature = "components")]
+ pub mod components;
+ pub mod momentum;
+ pub mod packages;

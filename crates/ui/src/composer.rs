@@ -19,9 +19,9 @@ actions!(composer, [Run, Append, Newline, PasteSmart, StopDictation]);
 pub fn bind(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", Run, Some("Composer > Input")),
-        KeyBinding::new("cmd-enter", Append, Some("Composer > Input")),
+        KeyBinding::new("secondary-enter", Append, Some("Composer > Input")),
         KeyBinding::new("shift-enter", Newline, Some("Composer > Input")),
-        KeyBinding::new("cmd-v", PasteSmart, Some("Composer > Input")),
+        KeyBinding::new("secondary-v", PasteSmart, Some("Composer > Input")),
         KeyBinding::new("escape", StopDictation, Some("Composer")),
     ]);
 }

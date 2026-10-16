@@ -8,6 +8,8 @@
 // `--big`: a perf fixture instead of the one-line chat: a main chat of 1,770 entries (markdown answers with headings,
 // lists, code blocks and tables, user messages, notes) and five child tasks of 60–200 entries, deterministic.
 const big = Deno.args.includes("--big");
+// Optional round-trip fixture for packaged-device checks; ordinary suites keep their original log.
+const echo = Deno.args.includes("--echo");
 const port = Number(Deno.args[0] ?? 18790);
 const list = Deno.args.slice(1).filter((a) => !a.startsWith("--")).map((a, i) => ({ name: a.split(":")[0], running: !a.endsWith(":off"), ...(i === 0 ? { default: true } : {}) }));
 const sockets = new Set<WebSocket>();
@@ -118,6 +120,14 @@ Deno.serve({ hostname: "127.0.0.1", port, onListen: () => console.log(`fake engi
     } else if (m.type === "connect" || m.type === "open") {
       if (m.type === "connect") { subsOf.get(socket)?.add(ws); send({ type: "hello", ws, version: "fake", build: "fake", running: true }); }
       send(snapshot(ws, m.task ?? 0));
+    } else if (m.type === "send" && echo) {
+      const task = m.task ?? 0;
+      const log = logs[task] ?? (logs[task] = []);
+      for (const [kind, text] of [["user", String(m.text ?? "")], ["talk", "Android test reply received."]]) {
+        const entry = { i: log.length, kind, text, size: text.length, date: new Date().toISOString() };
+        log.push(entry);
+        send({ type: "log", ws, task, entry });
+      }
     } else if (m.type === "disconnect") send({ type: "disconnected", ws });
     else if (m.type === "rpc") send({ type: "rpc", ws, id: m.id, result: m.method === "notices" ? notices(ws).map((n) => ({ ...n, readAt: read.has(n.id) ? now : null })) : m.method === "log.range" ? (logs[m.params?.task ?? 0] ?? []).filter((e) => e.i >= (m.params?.from ?? 0) && e.i < (m.params?.to ?? 1e9)) : [] });
     else if (m.type === "notices.read") {

@@ -1,0 +1,22 @@
+[package]
+name = "optchat-linux"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "optchat"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
+optchat-platform.workspace = true
+optchat-ui.workspace = true
+optchat-client.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+libc.workspace = true
+# Use the same Secret Service client and executor as GPUI's Linux backend.
+oo7.workspace = true
+smol.workspace = true

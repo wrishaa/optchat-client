@@ -19,6 +19,11 @@ pub trait SecureStore: Send + Sync {
 }
 
 pub trait Platform: Send + Sync + 'static {
+    /// Prepare OS microphone access before capture. A shell may request permission and
+    /// return an explanation while the user responds; the next attempt retries capture.
+    fn prepare_microphone(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// the OS's secure store for client tokens
     fn secure_store(&self) -> Option<Arc<dyn SecureStore>> {
         None
@@ -49,6 +54,9 @@ pub fn get() -> Option<&'static Arc<dyn Platform>> {
 }
 pub fn secure_store() -> Option<Arc<dyn SecureStore>> {
     get().and_then(|p| p.secure_store())
+}
+pub fn prepare_microphone() -> Result<(), String> {
+    get().map_or(Ok(()), |p| p.prepare_microphone())
 }
 pub fn resident_mb() -> f64 {
     get().and_then(|p| p.resident_mb()).unwrap_or(0.0)

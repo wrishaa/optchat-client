@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OptChat
+Comment=Native OptChat client
+Exec=optchat
+Icon=com.reframe.optchat.gpui
+Terminal=false
+Categories=Network;Chat;
+StartupWMClass=com.reframe.optchat.gpui

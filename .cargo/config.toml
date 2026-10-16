@@ -1,2 +1,6 @@
 [net]
 git-fetch-with-cli = true
+
+# Match the pinned GPUI Windows toolchain; avoid a separate VC++ runtime install.
+[target.'cfg(target_os = "windows")']
+rustflags = ["--cfg", "windows_slim_errors", "-C", "target-feature=+crt-static"]

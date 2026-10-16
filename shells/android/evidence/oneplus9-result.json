@@ -1,0 +1,10 @@
+{
+  "result": "PASS",
+  "checkedAt": "2026-10-15T18:43:48.5592391+00:00",
+  "apkSha256": "abd928f9c99e4907cdf77164d2a9168cb844c4283c456ba99e62fa0e5eaa7d20",
+  "deviceChecks": 25,
+  "tokenRestorationAfterRelaunch": true,
+  "homeResumeCycles": 3,
+  "androidBack": true,
+  "testDataRemoved": true
+}

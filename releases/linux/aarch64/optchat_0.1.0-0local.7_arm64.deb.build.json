@@ -1,0 +1,32 @@
+{
+  "format": "deb",
+  "maintainer": "Fabiha Tasneem <fabiha@reframe.so>",
+  "version": "0.1.0-0local.7",
+  "architecture": "arm64",
+  "depends": "libasound2t64 (>= 1.0.29), libc6 (>= 2.39), libgcc-s1 (>= 4.2), libssl3t64 (>= 3.0.0), libxcb1 (>= 1.12), libxkbcommon-x11-0 (>= 0.5.0), libxkbcommon0 (>= 0.5.0), libfontconfig1, libwayland-client0, libvulkan1, libegl1, libgles2, ca-certificates, xdg-utils, xdg-desktop-portal",
+  "required_glibc": "2.39",
+  "profile": "release-lite",
+  "packaged_smoke_test": "not_run",
+  "sha256": "24b71332e4b3ef845ed6da0b131d981dc76df82b93b6fe35b179cb29b9020b50",
+  "build_os": {
+    "NAME": "Ubuntu",
+    "ID": "ubuntu",
+    "PRETTY_NAME": "Ubuntu 24.04.5 LTS",
+    "VERSION_ID": "24.04",
+    "VERSION": "24.04.5 LTS (Noble Numbat)",
+    "VERSION_CODENAME": "noble",
+    "ID_LIKE": "debian",
+    "HOME_URL": "https://www.ubuntu.com/",
+    "SUPPORT_URL": "https://help.ubuntu.com/",
+    "BUG_REPORT_URL": "https://bugs.launchpad.net/ubuntu/",
+    "PRIVACY_POLICY_URL": "https://www.ubuntu.com/legal/terms-and-policies/privacy-policy",
+    "UBUNTU_CODENAME": "noble",
+    "LOGO": "ubuntu-logo"
+  },
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_revision": "78d8c1d1fef864b4e760b95fe4963b75afef659d",
+  "source_has_local_changes": false,
+  "install_upgrade_remove_test": "not_run",
+  "builder_image": "localhost/optchat-build-ubuntu24.04-aarch64:1.98.1",
+  "builder_image_id": "8e03d69cc9c441e2b9d1d7825bec8747352f4a891e62d01e832e37ec2b52acda"
+}
