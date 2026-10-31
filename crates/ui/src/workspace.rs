@@ -175,6 +175,7 @@ impl Workspace {
                 this.overlay = Some(Overlay::Lightbox(blob.clone()));
                 cx.notify();
             }
+            FeedEvent::Folds => cx.notify(),
         }));
         subs.push(cx.subscribe_in(&tasks_panel, window, |this: &mut Workspace, _, ev: &tasks_view::TasksEvent, window, cx| {
             match ev {

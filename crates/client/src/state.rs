@@ -101,10 +101,13 @@ pub struct Prefs {
     pub tabs: Vec<i64>,
     pub current: i64,
     pub font_size: f32,
+    /// "Collapse internal messages" for workspaces whose engine has no ui.get / ui.set (kept on this device), by
+    /// workspace key; engines that have it keep the choice for every client
+    pub collapse_internal: BTreeMap<String, bool>,
 }
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { engines: vec![], connections: vec![], active: None, ws: BTreeMap::new(), window: None, view: View::Tasks, side_open: true, side_w: 320.0, task_scope_all: false, show_ended: true, settings_tab_global: false, theme: None, follow_system: true, tabs: vec![0], current: 0, font_size: 14.0 }
+        Prefs { engines: vec![], connections: vec![], active: None, ws: BTreeMap::new(), window: None, view: View::Tasks, side_open: true, side_w: 320.0, task_scope_all: false, show_ended: true, settings_tab_global: false, theme: None, follow_system: true, tabs: vec![0], current: 0, font_size: 14.0, collapse_internal: BTreeMap::new() }
     }
 }
 
@@ -184,6 +187,7 @@ pub struct WsData {
     pub notices: Vec<Notice>,
     pub notices_loaded: bool,
     pub wp: WsPrefs,
+    pub ui: Option<UiSettings>,
 }
 impl WsData {
     pub fn new(hub: Option<Arc<Client>>, wp: WsPrefs) -> WsData {
@@ -199,6 +203,7 @@ impl WsData {
             cur: Cur::default(),
             models: vec![],
             global: GlobalSettings::default(),
+            ui: None,
             busy: vec![],
             failed: BTreeMap::new(),
             approvals: vec![],
@@ -266,6 +271,8 @@ pub struct AppState {
     pub cur: Cur,
     pub models: Vec<ModelInfo>,
     pub global: GlobalSettings,
+    /// the workspace's display settings from its engine (snapshot `ui`, event "ui"); None: the engine predates them
+    pub ui: Option<UiSettings>,
     pub busy: Vec<String>,
     pub failed: BTreeMap<String, String>,
     pub node_tick: u64,
@@ -339,6 +346,7 @@ impl AppState {
             cur: Cur::default(),
             models: vec![],
             global: GlobalSettings::default(),
+            ui: None,
             busy: vec![],
             failed: BTreeMap::new(),
             node_tick: 0,
@@ -721,6 +729,7 @@ impl AppState {
         swap(&mut self.cur, &mut d.cur);
         swap(&mut self.models, &mut d.models);
         swap(&mut self.global, &mut d.global);
+        swap(&mut self.ui, &mut d.ui);
         swap(&mut self.busy, &mut d.busy);
         swap(&mut self.failed, &mut d.failed);
         swap(&mut self.approvals, &mut d.approvals);
@@ -942,6 +951,37 @@ impl AppState {
         .detach();
     }
 
+    /// "Collapse internal messages" for the workspace on screen: the engine's setting (every client), or this device's
+    /// choice when the engine predates ui.get / ui.set. Default off.
+    pub fn collapse_internal(&self) -> bool {
+        match &self.ui {
+            Some(u) => u.collapse_internal,
+            None => self.prefs.collapse_internal.get(&self.active).copied().unwrap_or(false),
+        }
+    }
+    pub fn set_collapse_internal(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.feed_rev += 1;
+        if let Some(u) = self.ui.as_mut() {
+            // shown at once; the engine's "ui" event confirms it to every client (this one too)
+            u.collapse_internal = on;
+            let key = self.active.clone();
+            self.run(cx, move |h| async move { h.ui_set(serde_json::json!({ "collapseInternal": on })).await }, move |s, r, cx| {
+                if let Err(e) = r {
+                    s.notice_in(&key, "error", format!("couldn't save “Collapse internal messages”: {e}"), cx);
+                }
+            });
+        } else {
+            let key = self.active.clone();
+            if on {
+                self.prefs.collapse_internal.insert(key, true);
+            } else {
+                self.prefs.collapse_internal.remove(&key);
+            }
+            self.save_prefs();
+        }
+        cx.notify();
+    }
+
     /// A command whose outcome is a notice of the workspace (an error always; `ok_notice`: success too).
     pub fn command<F: std::future::Future<Output = Result<String, String>> + Send + 'static>(&self, cx: &mut Context<Self>, ok_notice: bool, f: impl FnOnce(Arc<Client>) -> F + Send + 'static) {
         let key = self.active.clone();
@@ -1043,6 +1083,10 @@ impl AppState {
         self.instance = s.instance.clone();
         self.computer_available = s.computer_available;
         self.global = s.global.clone();
+        if self.ui != s.ui {
+            self.ui = s.ui.clone();
+            self.feed_rev += 1;
+        }
         self.models = s.models.clone();
         self.busy = s.busy.clone();
         self.failed = s.failed.clone();
@@ -1199,6 +1243,10 @@ impl AppState {
             HubEvent::ApprovalDone(id) => self.approvals.retain(|x| x.id != id),
             HubEvent::Models(m) => self.models = m,
             HubEvent::Global(g) => self.global = g,
+            HubEvent::Ui(u) => {
+                self.ui = Some(u);
+                self.feed_rev += 1;
+            }
             HubEvent::Dictation { .. } if self.quiet => {}
             HubEvent::Dictation { task, ev } => {
                 self.dict.task = task;

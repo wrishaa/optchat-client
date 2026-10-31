@@ -97,6 +97,16 @@ pub fn tab_strip(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Works
         ));
     }
     let mut actions = div().flex().flex_none().items_center().gap(px(2.)).px(px(6.)).h_full().border_l_1().border_color(k.line);
+    // runs of internal messages in the feed: fold them all into their one-line summaries, or open them all
+    let (runs, open) = w.feed.read(cx).fold_state();
+    if runs {
+        actions = actions.child(
+            icon_btn("act-folds", if open { "minimize-2" } else { "maximize-2" }, 14., cx)
+                .tooltip(tooltip(if open { "Collapse internal messages" } else { "Expand internal messages" }))
+                .child(probe("act.folds"))
+                .on_click(cx.listener(|w, _, _, cx| w.feed.update(cx, |f, cx| f.toggle_all(cx)))),
+        );
+    }
     if let Some(st) = st {
         let term = st.terminal();
         if !term && st != TaskStatus::Paused && st != TaskStatus::Pending {

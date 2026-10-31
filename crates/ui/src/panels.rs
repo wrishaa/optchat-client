@@ -1310,6 +1310,29 @@ impl SettingsPanel {
                     .child(seg("dict-claude", "Claude", g.dictation == DictationService::Claude, cx).child(probe("settings.dict.claude")).on_click(move |_, _, cx| st2.update(cx, |s, cx| s.command(cx, false, |h| async move { { h.update_global(None, Some(DictationService::Claude)); Ok(String::new()) } }))))
                     .child(seg("dict-codex", "Codex", g.dictation == DictationService::Codex, cx).child(probe("settings.dict.codex")).on_click(move |_, _, cx| st3.update(cx, |s, cx| s.command(cx, false, |h| async move { { h.update_global(None, Some(DictationService::Codex)); Ok(String::new()) } })))),
             );
+        // how the chat shows: the engine keeps it for every client; an older engine: this device remembers it
+        let collapse = s.collapse_internal();
+        let ws_chat = section(cx)
+            .mt(px(14.))
+            .child(section_title("chat", cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.))
+                    .py(px(6.))
+                    .child(div().flex_1().min_w_0().flex().flex_col().text_size(px(13.)).child("Collapse internal messages").child(div().text_size(px(11.)).text_color(k.muted).child("Tool calls and child reports show as one line.")))
+                    .child(Switch::new("collapse-internal").checked(collapse).on_click({
+                        let st = st_e.clone();
+                        move |on: &bool, _, cx| {
+                            let on = *on;
+                            st.update(cx, |s, cx| s.set_collapse_internal(on, cx));
+                        }
+                    }))
+                    .child(probe("settings.collapse")),
+            );
+        let ws_global = ws_global.child(ws_chat);
         let Some(st) = s.cur.settings.clone() else { return pad(div()).child(probe("settings")).child(tabs).child(ws_head).child(ws_global).into_any_element() };
         let info = s.info().cloned();
         let parent = info.as_ref().and_then(|i| i.task.parent).and_then(|p| s.tasks.get(&p)).map(|p| p.task.settings.depth);

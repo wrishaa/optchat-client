@@ -330,6 +330,7 @@ fn header(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) 
     let cost = sub_metric(s);
     let alert = s.background_alert();
     set_state_extra("phoneHeader", serde_json::json!({ "title": title, "subtitle": sub, "cost": cost }));
+    let (runs, folds_open) = w.feed.read(cx).fold_state();
     div()
         .flex_none()
         .h(px(56.))
@@ -385,6 +386,14 @@ fn header(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) 
                     }
                 })),
         )
+        .when(runs, |d| {
+            // runs of internal messages in the chat: fold them all into one line each, or open them all
+            d.child(
+                icon_btn("ph-folds", if folds_open { "minimize-2" } else { "maximize-2" }, 17., cx)
+                    .child(probe("phone.folds"))
+                    .on_click(cx.listener(|w, _, _, cx| w.feed.update(cx, |f, cx| f.toggle_all(cx)))),
+            )
+        })
         .child(
             div()
                 .id("ph-cost")

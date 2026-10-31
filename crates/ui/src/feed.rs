@@ -29,6 +29,8 @@ pub enum Row {
     Talk(Arc<LogEntry>),
     Image(Arc<LogEntry>),
     Tool { e: Arc<LogEntry>, echo: Option<Arc<LogEntry>>, images: Vec<Arc<LogEntry>> },
+    /// a run of internal messages: folded (one line in place of the run) or open (a small handle above it)
+    Fold { run: Arc<Run>, open: bool },
     Live { turn_id: String },
     Foot { turn_id: String },
 }
@@ -37,6 +39,130 @@ pub enum FeedEvent {
     SelectRequest(String),
     OpenTask(i64),
     Lightbox(String),
+    /// runs were folded or opened (the header's collapse / expand all control follows)
+    Folds,
+}
+
+/// A run of internal messages (app/ui/chat.tsx runsOf): child reports, tool calls and their results in a row, across
+/// groups of reports logged between turns, never past a turn's end, a user / parent / talk message, or the "not run
+/// yet" divider. Only a run of 2+ cards, or one with a report, folds (one tool is one line already).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    /// `<task>:<first entry>`, like the web app
+    pub key: String,
+    pub first: i64,
+    pub last: i64,
+    /// cards in it: reports + tool calls (+ results without their call)
+    pub units: usize,
+    /// (child task, reports from it), most first
+    pub reports: Vec<(i64, usize)>,
+    pub tools: usize,
+    pub errors: usize,
+    pub from: String,
+    pub to: String,
+    pub call_ids: Vec<String>,
+}
+
+/// Which runs show folded: a mode for all of them (the workspace setting, or the header's collapse / expand all)
+/// and the runs tapped away from it.
+#[derive(Clone, Debug, Default)]
+pub struct Folds {
+    pub mode: bool,
+    pub flips: HashSet<String>,
+}
+impl Folds {
+    pub fn collapsed(&self, key: &str) -> bool {
+        self.mode != self.flips.contains(key)
+    }
+}
+
+fn internal(e: &LogEntry) -> bool {
+    matches!(e.kind, LogKind::Task | LogKind::Tool | LogKind::Echo)
+}
+
+/// log position → its run (foldable runs only), for the entries from `from` on
+fn runs_of(log: &[Arc<LogEntry>], from: usize, task: i64, unrun: Option<i64>) -> HashMap<usize, Arc<Run>> {
+    let mut out = HashMap::new();
+    let close = |cur: &mut Vec<usize>, paired: &mut HashSet<usize>, out: &mut HashMap<usize, Arc<Run>>| {
+        if cur.is_empty() {
+            return;
+        }
+        let (mut tools, mut errors, mut n_reports) = (0usize, 0usize, 0usize);
+        let mut by: Vec<(i64, usize)> = vec![];
+        let mut call_ids = vec![];
+        for &k in cur.iter() {
+            let e = &log[k];
+            match e.kind {
+                LogKind::Task => {
+                    n_reports += 1;
+                    let (id, kind, _) = parse_report(e);
+                    match by.iter_mut().find(|x| x.0 == id) {
+                        Some(x) => x.1 += 1,
+                        None => by.push((id, 1)),
+                    }
+                    if kind == "error" {
+                        errors += 1;
+                    }
+                }
+                LogKind::Tool => {
+                    tools += 1;
+                    call_ids.push(e.meta_str("callId").unwrap_or("").to_string());
+                }
+                _ => {
+                    if !paired.contains(&k) {
+                        tools += 1;
+                    }
+                    if e.image.is_none() && e.meta_bool("isError") {
+                        errors += 1;
+                    }
+                }
+            }
+        }
+        let units = n_reports + tools;
+        if units >= 2 || n_reports > 0 {
+            by.sort_by(|a, b| b.1.cmp(&a.1));
+            let (first, last) = (&log[cur[0]], &log[*cur.last().unwrap()]);
+            let r = Arc::new(Run { key: format!("{task}:{}", first.i), first: first.i, last: last.i, units, reports: by, tools, errors, from: first.date.clone(), to: last.date.clone(), call_ids });
+            for &k in cur.iter() {
+                out.insert(k, r.clone());
+            }
+        }
+        cur.clear();
+        paired.clear();
+    };
+    let (mut cur, mut paired) = (vec![], HashSet::new());
+    let mut after_turn = false;
+    let mut k = from.min(log.len());
+    while k < log.len() {
+        let tid = log[k].turn_id.clone();
+        let mut end = k + 1;
+        if tid.is_some() {
+            while end < log.len() && log[end].turn_id == tid {
+                end += 1;
+            }
+        }
+        if after_turn {
+            close(&mut cur, &mut paired, &mut out); // a turn's group ends with its foot
+        }
+        let g = &log[k..end];
+        let calls: HashSet<&str> = g.iter().filter(|e| e.kind == LogKind::Tool).filter_map(|e| e.meta_str("callId")).collect();
+        for (j, e) in g.iter().enumerate() {
+            if Some(e.i) == unrun || !internal(e) {
+                close(&mut cur, &mut paired, &mut out);
+                if !internal(e) {
+                    continue;
+                }
+            }
+            cur.push(k + j);
+            if e.kind == LogKind::Echo && e.meta_str("callId").is_some_and(|c| calls.contains(c)) {
+                paired.insert(k + j);
+            }
+        }
+        after_turn = tid.is_some();
+        k = end;
+    }
+    close(&mut cur, &mut paired, &mut out);
+    out
 }
 impl EventEmitter<FeedEvent> for Feed {}
 
@@ -65,6 +191,9 @@ pub struct Feed {
     pub compact: bool,
     /// UI tests: the most live text / thinking seen in this task's running turn (chars)
     live_max: (usize, usize),
+    /// folded runs of internal messages; `fold_default` is the workspace setting they last followed
+    pub folds: Folds,
+    fold_default: Option<bool>,
 }
 
 /// entries shown when a task opens, and added per "load earlier" (like the web app's snapshot of 120)
@@ -106,6 +235,8 @@ impl Feed {
             scrolled_up: false,
             compact: false,
             live_max: (0, 0),
+            folds: Folds::default(),
+            fold_default: None,
         };
         f.sync(cx);
         let me = cx.entity().downgrade();
@@ -174,6 +305,39 @@ impl Feed {
         self.sync(cx);
     }
 
+    /// tap on a run's line or handle: fold / open just that run
+    fn toggle_run(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.folds.flips.remove(key) {
+            self.folds.flips.insert(key.to_string());
+        }
+        self.rev = u64::MAX;
+        self.sync(cx);
+        cx.emit(FeedEvent::Folds);
+    }
+
+    /// runs in the feed (folded or not) and whether any shows open: the header's control
+    pub fn fold_state(&self) -> (bool, bool) {
+        let mut any = false;
+        let mut open = false;
+        for r in &self.rows {
+            if let Row::Fold { open: o, .. } = r {
+                any = true;
+                open |= *o;
+            }
+        }
+        (any, open)
+    }
+
+    /// the header's control: fold every run when one shows open, else open them all
+    pub fn toggle_all(&mut self, cx: &mut Context<Self>) {
+        let (_, open) = self.fold_state();
+        self.folds.mode = open;
+        self.folds.flips.clear();
+        self.rev = u64::MAX;
+        self.sync(cx);
+        cx.emit(FeedEvent::Folds);
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         let n = self.rows.len();
         if n > 0 {
@@ -187,6 +351,12 @@ impl Feed {
         if s.feed_rev == self.rev && s.open_seq == self.seq {
             return;
         }
+        // the workspace setting moved (or another workspace is on screen): every run follows it again
+        let def = s.collapse_internal();
+        if self.fold_default != Some(def) {
+            self.fold_default = Some(def);
+            self.folds = Folds { mode: def, flips: HashSet::new() };
+        }
         let switched = s.open_seq != self.seq || s.current != self.task;
         self.rev = s.feed_rev;
         self.seq = s.open_seq;
@@ -198,14 +368,14 @@ impl Feed {
             self.full.clear();
             self.from = None;
             self.live_max = (0, 0);
-            for p in ["tool.", "img.", "foot.", "feed.more", "feed.jump", "rep.", "work.", "cut.", "toolimg."] {
+            for p in ["tool.", "img.", "foot.", "feed.more", "feed.jump", "rep.", "work.", "cut.", "toolimg.", "fold.", "foldh."] {
                 crate::ui::clear_probes(p);
             }
         }
         if self.from.is_none() && s.cur.loaded {
             self.from = Some(group_start(&s.cur.log, s.cur.log.len().saturating_sub(PAGE)));
         }
-        let rows = build_rows(s, self.from.unwrap_or(0));
+        let rows = build_rows(s, self.from.unwrap_or(0), &self.folds);
         if crate::ui::probes_on() {
             // UI tests: skeletons drawn while a task loads; which empty state (never the root's on a real chat)
             match rows.first() {
@@ -315,6 +485,10 @@ fn row_key(r: &Row, s: &AppState, open: &HashSet<String>) -> (String, u64) {
             let st = e.meta_str("callId").and_then(|c| s.cur.tools.get(c)).map(|t| if t.running { 1 } else { 2 }).unwrap_or(0);
             (k.clone(), echo.as_ref().map(|x| x.i as u64 + 1).unwrap_or(0) * 8 + st + images.len() as u64 * 1000 + o(&k))
         }
+        Row::Fold { run, open } => {
+            let live = run_live(run, s) as u64;
+            (format!("f{}", run.key), run.units as u64 | (*open as u64) << 32 | live << 33 | (run.last as u64) << 34)
+        }
         Row::Live { turn_id } => {
             let n: usize = s.cur.live.values().filter(|l| &l.turn_id == turn_id).map(|l| l.text.len() * 3 + l.thinking.len()).sum();
             let st = s.cur.turns.get(turn_id).map(|t| t.status.len()).unwrap_or(0);
@@ -332,7 +506,13 @@ fn row_key(r: &Row, s: &AppState, open: &HashSet<String>) -> (String, u64) {
     }
 }
 
-pub fn build_rows(s: &AppState, from: usize) -> Vec<Row> {
+/// a run is live while it ends the running turn, or a tool in it runs
+fn run_live(r: &Run, s: &AppState) -> bool {
+    let running_last = s.cur.running.as_ref().and_then(|t| s.cur.log.iter().rev().find(|e| e.turn_id.as_deref() == Some(t.id.as_str()))).map(|e| e.i);
+    running_last == Some(r.last) || r.call_ids.iter().any(|c| s.cur.tools.get(c).is_some_and(|t| t.running))
+}
+
+pub fn build_rows(s: &AppState, from: usize, folds: &Folds) -> Vec<Row> {
     if !s.cur.loaded {
         return vec![Row::Skeleton];
     }
@@ -345,6 +525,7 @@ pub fn build_rows(s: &AppState, from: usize) -> Vec<Row> {
     let running_id = s.cur.running.as_ref().map(|r| r.id.clone());
     let mut rows = vec![];
     let from = from.min(log.len());
+    let runs = runs_of(log, from, s.current, unrun);
     // older entries: those loaded but not shown yet, plus those still on the hub (the snapshot carries the last 120)
     let on_hub = log.first().map(|e| e.i.max(0) as usize).unwrap_or(0);
     if from > 0 || on_hub > 0 {
@@ -380,7 +561,17 @@ pub fn build_rows(s: &AppState, from: usize) -> Vec<Row> {
                 }
             }
         }
-        for e in g {
+        for (j, e) in g.iter().enumerate() {
+            // a folded run is one line at its first entry; an open one has a handle there
+            if let Some(r) = runs.get(&(k + j)) {
+                let folded = folds.collapsed(&r.key);
+                if e.i == r.first {
+                    rows.push(Row::Fold { run: r.clone(), open: !folded });
+                }
+                if folded {
+                    continue;
+                }
+            }
             match e.kind {
                 LogKind::User if work(&e.text) => rows.push(Row::Work(e.clone())),
                 LogKind::User | LogKind::Note => rows.push(if e.image.is_some() { Row::Image(e.clone()) } else { Row::User(e.clone()) }),
@@ -442,8 +633,8 @@ impl Render for Feed {
             let mut full: Vec<&i64> = self.full.iter().collect();
             full.sort();
             let top = self.list.logical_scroll_top();
-            crate::ui::set_state_extra("feed", serde_json::json!({ "open": open, "from": self.from.and_then(|k| self.state.read(cx).cur.log.get(k).map(|e| e.i)), "rows": self.rows.len(), "scrolledUp": self.scrolled_up, "full": full, "top": [top.item_ix, f32::from(top.offset_in_item)], "liveText": self.live_max.0, "liveNow": self.state.read(cx).cur.live.values().map(|l| l.text.len()).sum::<usize>(), "liveThinking": self.live_max.1, "task": self.task }));
-            for p in ["tool.", "img.", "foot.", "feed.more", "feed.jump", "feed.last", "rep.", "work.", "cut.", "toolimg."] {
+            crate::ui::set_state_extra("feed", serde_json::json!({ "open": open, "from": self.from.and_then(|k| self.state.read(cx).cur.log.get(k).map(|e| e.i)), "rows": self.rows.len(), "scrolledUp": self.scrolled_up, "full": full, "top": [top.item_ix, f32::from(top.offset_in_item)], "liveText": self.live_max.0, "liveNow": self.state.read(cx).cur.live.values().map(|l| l.text.len()).sum::<usize>(), "liveThinking": self.live_max.1, "task": self.task, "foldMode": self.folds.mode, "foldFlips": self.folds.flips.iter().collect::<Vec<_>>(), "foldDefault": self.fold_default, "folds": self.rows.iter().filter_map(|r| if let Row::Fold { run, open } = r { Some(serde_json::json!({ "key": run.key, "open": open, "units": run.units })) } else { None }).collect::<Vec<_>>() }));
+            for p in ["tool.", "img.", "foot.", "feed.more", "feed.jump", "feed.last", "rep.", "work.", "cut.", "toolimg.", "fold.", "foldh."] {
                 crate::ui::clear_probes(p);
             }
         }
@@ -521,6 +712,7 @@ impl Feed {
             Row::Work(e) => self.work(&e, window, cx),
             Row::Talk(e) => self.talk(&e, window, cx),
             Row::Tool { e, echo, images } => self.tool(&e, echo.as_ref(), &images, cx),
+            Row::Fold { run, open } => self.fold_row(&run, open, cx),
             Row::Live { turn_id } => self.live(&turn_id, window, cx),
             Row::Foot { turn_id } => self.foot(&turn_id, cx),
         };
@@ -662,7 +854,7 @@ impl Feed {
     fn show_all(&mut self, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
         self.from = Some(0);
-        let rows = build_rows(s, 0);
+        let rows = build_rows(s, 0, &self.folds);
         self.keys = rows.iter().map(|r| row_key(r, s, &self.open)).collect();
         self.rows = rows;
         self.list.reset(self.rows.len());
@@ -718,7 +910,7 @@ impl Feed {
         let old = self.rows.len();
         let s = self.state.read(cx);
         self.from = Some(group_start(&s.cur.log, from.saturating_sub(MORE)));
-        let rows = build_rows(s, self.from.unwrap());
+        let rows = build_rows(s, self.from.unwrap(), &self.folds);
         let keys: Vec<(String, u64)> = rows.iter().map(|r| row_key(r, s, &self.open)).collect();
         // old rows: [more, r1..rn]; new rows: [more?, earlier..., r1..rn]. Replace the old "more" row so r1..rn
         // keep their measured heights and only the earlier rows get measured.
@@ -1405,6 +1597,82 @@ impl Feed {
     }
 
     /// compact: one quiet line per tool call ("⁘ bash ls -la … 4.2s ■"), tap to expand
+    /// a folded run: "▸ 14 internal updates · #49 scheduled jobs ×6 · #73 heartbeat ×5 · +2 more · 3 tools   10:16–10:30";
+    /// an open one: a quiet "▾ collapse 14 updates" handle above it
+    fn fold_row(&mut self, r: &Arc<Run>, open: bool, cx: &mut Context<Self>) -> AnyElement {
+        let k = c(cx).clone();
+        let key = r.key.clone();
+        let hover = k.hover;
+        if open {
+            let muted = k.muted;
+            return div()
+                .id(ElementId::Name(format!("fh{}", r.key).into()))
+                .flex()
+                .items_center()
+                .gap(zx(5.))
+                .mt(zx(4.))
+                .text_size(zx(11.5))
+                .text_color(k.faint)
+                .cursor_pointer()
+                .hover(move |s| s.text_color(muted))
+                .child(icon("chevron-down", 12., k.faint))
+                .child(if r.units == 1 { "collapse this".to_string() } else { format!("collapse {} updates", r.units) })
+                .child(probe(format!("foldh.{}", r.key)))
+                .on_click(cx.listener(move |f, _, _, cx| f.toggle_run(&key, cx)))
+                .into_any_element();
+        }
+        let s = self.state.read(cx);
+        let live = run_live(r, s);
+        let mut names: Vec<String> = r
+            .reports
+            .iter()
+            .take(2)
+            .map(|(id, n)| {
+                let name = s.tasks.get(id).map(|x| task_name(&x.task)).unwrap_or_default();
+                format!("#{id}{}{}", if name.is_empty() { String::new() } else { format!(" {name}") }, if *n > 1 { format!(" ×{n}") } else { String::new() })
+            })
+            .collect();
+        if r.reports.len() > 2 {
+            names.push(format!("+{} more", r.reports.len() - 2));
+        }
+        let mut counts: Vec<String> = vec![];
+        if r.tools > 0 {
+            counts.push(format!("{} tool{}", r.tools, if r.tools == 1 { "" } else { "s" }));
+        }
+        let lead = format!("{} internal update{}", r.units, if r.units == 1 { "" } else { "s" });
+        let (a, b) = (fmt::time(&r.from), fmt::time(&r.to));
+        let when = if a == b || self.compact { b } else { format!("{a}–{b}") };
+        let errs = r.errors;
+        div()
+            .id(ElementId::Name(format!("fl{}", r.key).into()))
+            .flex()
+            .items_center()
+            .gap(zx(7.))
+            .my(zx(5.))
+            .px(zx(10.))
+            .py(zx(6.))
+            .rounded(zx(8.))
+            .border_1()
+            .border_color(k.line)
+            .bg(k.bg2)
+            .text_size(zx(12.5))
+            .text_color(k.muted)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(icon("chevron-right", 12., k.muted))
+            .when(live, |d| d.child(dot(k.accent, 6.)))
+            .child(div().flex_none().text_color(k.text2).child(lead))
+            // the names shrink first (an ellipsis); the counts after them always show
+            .when(!names.is_empty(), |d| d.child(div().flex_shrink_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("· {}", names.join(" · ")))))
+            .when(!counts.is_empty(), |d| d.child(div().flex_none().child(format!("· {}", counts.join(" · ")))))
+            .when(errs > 0, |d| d.child(div().flex_none().text_color(k.red).child(format!("· {errs} error{}", if errs == 1 { "" } else { "s" }))))
+            .child(div().flex_1())
+            .child(div().flex_none().font_family(crate::ui::MONO).text_size(zx(10.5)).text_color(k.faint).child(when))
+            .child(probe(format!("fold.{}", r.key)))
+            .on_click(cx.listener(move |f, _, _, cx| f.toggle_run(&key, cx)))
+            .into_any_element()
+    }
+
     fn tool_line(&mut self, e: &Arc<LogEntry>, echo: Option<&Arc<LogEntry>>, key: &str, cx: &mut Context<Self>) -> AnyElement {
         let k = c(cx).clone();
         let name = e.meta_str("name").map(String::from).unwrap_or_else(|| e.text.split(' ').next().unwrap_or("").to_string());
@@ -1710,5 +1978,53 @@ mod lenient_tests {
         assert!(v.get("instruction").is_none());
         assert_eq!(arg_preview("task_spawn", &v), "handoff: clean caches");
         assert!(lenient_json("not json").is_none());
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    fn e(i: i64, kind: &str, text: &str, turn: Option<&str>, meta: serde_json::Value) -> Arc<LogEntry> {
+        let mut v = serde_json::json!({ "i": i, "kind": kind, "text": text, "size": text.len(), "date": "2026-10-31T10:00:00Z" });
+        if let Some(t) = turn {
+            v["turnId"] = t.into();
+        }
+        if !meta.is_null() {
+            v["meta"] = meta;
+        }
+        Arc::new(serde_json::from_value(v).unwrap())
+    }
+    #[::core::prelude::v1::test]
+    fn runs_like_the_web_app() {
+        let n = serde_json::Value::Null;
+        let log = vec![
+            e(0, "user", "go", None, n.clone()),
+            e(1, "talk", "ok", Some("t1"), n.clone()),
+            e(2, "tool", "bash {}", Some("t1"), serde_json::json!({ "name": "bash", "callId": "a" })),
+            e(3, "echo", "out", Some("t1"), serde_json::json!({ "callId": "a" })),
+            e(4, "tool", "bash {}", Some("t1"), serde_json::json!({ "name": "bash", "callId": "b" })),
+            e(5, "echo", "out", Some("t1"), serde_json::json!({ "callId": "b", "isError": true })),
+            e(6, "talk", "done", Some("t1"), n.clone()),
+            // reports between turns: one run (a turn's end closed the one before)
+            e(7, "task", "#1 talk: hi", None, n.clone()),
+            e(8, "task", "#2 error: boom", None, n.clone()),
+            e(9, "task", "#1 talk: again", None, n.clone()),
+            e(10, "user", "and?", None, n.clone()),
+            // one tool alone: not folded
+            e(11, "tool", "bash {}", Some("t2"), serde_json::json!({ "name": "bash", "callId": "c" })),
+            e(12, "echo", "out", Some("t2"), serde_json::json!({ "callId": "c" })),
+            e(13, "talk", "so", Some("t2"), n.clone()),
+        ];
+        let runs = runs_of(&log, 0, 0, None);
+        let a = runs.get(&2).unwrap();
+        assert_eq!((a.key.as_str(), a.first, a.last, a.units, a.tools, a.errors), ("0:2", 2, 5, 2, 2, 1));
+        let b = runs.get(&7).unwrap();
+        assert_eq!((b.first, b.last, b.units, b.errors), (7, 9, 3, 1));
+        assert_eq!(b.reports, vec![(1, 2), (2, 1)]);
+        assert!(runs.get(&11).is_none() && runs.get(&1).is_none() && runs.get(&10).is_none());
+        // the "not run yet" divider splits a run
+        let split = runs_of(&log, 0, 0, Some(8));
+        assert_eq!(split.get(&8).unwrap().first, 8);
+        assert_eq!(split.get(&7).unwrap().last, 7);
     }
 }

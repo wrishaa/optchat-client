@@ -138,6 +138,8 @@ pub struct Snapshot {
     pub history: bool,
     /// unread notices by level
     pub notices: Unread,
+    /// how every client shows the workspace (hub kv `ui:settings`); None: an engine from before ui.get / ui.set
+    pub ui: Option<UiSettings>,
 }
 impl Snapshot {
     pub fn parse(m: &Value) -> Option<Snapshot> {
@@ -174,7 +176,21 @@ impl Snapshot {
             requests: m["requests"].as_array().map(|a| a.iter().filter_map(|t| from::<RequestRecord>(t)).collect()).unwrap_or_default(),
             history: m.get("turns").is_some_and(|t| t.is_array()),
             notices: from(&m["notices"]).unwrap_or_default(),
+            ui: m.get("ui").filter(|v| v.is_object()).map(UiSettings::parse),
         })
+    }
+}
+
+/// How every client of a workspace shows it (hub kv `ui:settings`, rpc ui.get / ui.set, event "ui"): only booleans,
+/// absent = off. Older engines don't have it: the client keeps a device-local choice instead.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UiSettings {
+    /// runs of internal messages (tool calls, child reports) start folded into one line
+    pub collapse_internal: bool,
+}
+impl UiSettings {
+    pub fn parse(v: &Value) -> UiSettings {
+        UiSettings { collapse_internal: v["collapseInternal"].as_bool().unwrap_or(false) }
     }
 }
 
@@ -250,6 +266,8 @@ pub enum HubEvent {
     /// the engine refused or dropped this workspace's connection (no token that reaches it, token revoked): the
     /// connection stays listed, unsubscribed, until connected again with a token
     Refused(String),
+    /// the workspace's display settings changed (another client or this one set them)
+    Ui(UiSettings),
 }
 
 /// A workspace in an engine's public list: name, running, and whether it is the engine's default one.
@@ -320,6 +338,7 @@ pub fn parse_event(m: &Value) -> Option<HubEvent> {
         "serverLog" => Some(HubEvent::ServerLog(s(&m["line"]))),
         "approval" => Some(HubEvent::Approval(Approval { id: s(&m["id"]), message: s(&m["message"]), meta: m["meta"].clone(), task: m["task"].as_i64() })),
         "approvalDone" => Some(HubEvent::ApprovalDone(s(&m["id"]))),
+        "ui" => Some(HubEvent::Ui(UiSettings::parse(&m["ui"]))),
         "models" => Some(HubEvent::Models(from(&m["models"]).unwrap_or_default())),
         "settings" => Some(HubEvent::Settings { task: task(), settings: from(&m["settings"])?, global: from(&m["global"]), tools: from(&m["tools"]) }),
         "controlDone" => Some(HubEvent::Notice { ok: m["ok"].as_bool().unwrap_or(false), message: s(&m["message"]), spawned: m["spawned"].as_i64() }),

@@ -627,6 +627,11 @@ impl Client {
         self.control(task, "hideModel", json!({ "model": model, "hidden": hidden })).await
     }
 
+    /// the workspace's display settings (hub kv `ui:settings`): engines from before them answer "unknown rpc ui.set"
+    pub async fn ui_set(&self, patch: Value) -> Result<Value, String> {
+        self.rpc("ui.set", json!({ "patch": patch })).await
+    }
+
     // ---- rpc --------------------------------------------------------------------------------------------------------
     pub async fn turns_recent(&self, task: i64, limit: usize) -> Vec<TurnRecord> {
         self.rpc("turns.recent", json!({ "task": task, "limit": limit })).await.ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
