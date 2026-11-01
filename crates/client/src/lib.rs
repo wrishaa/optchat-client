@@ -3,6 +3,7 @@
 pub mod client;
 pub mod media;
 pub mod mic;
+pub mod respell;
 pub mod state;
 pub mod timer;
 pub mod tokens;

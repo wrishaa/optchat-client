@@ -816,11 +816,11 @@ impl DictSession {
                 let Ok(m) = serde_json::from_str::<Value>(t.as_str()) else { continue };
                 match m["type"].as_str() {
                     Some("ready") if !me.stopped.load(Ordering::SeqCst) => emit(DictEvent::State("listening".into())),
-                    Some("text") => emit(DictEvent::Text(m["text"].as_str().unwrap_or("").to_string())),
+                    Some("text") => emit(DictEvent::Text(crate::respell::respell(m["text"].as_str().unwrap_or("")))),
                     Some("error") => emit(DictEvent::Error(m["message"].as_str().unwrap_or("").to_string())),
                     Some("done") => {
                         done = true;
-                        emit(DictEvent::Done { text: m["text"].as_str().unwrap_or("").to_string(), service: m["service"].as_str().map(String::from), audio_ms: m["audioMs"].as_u64().unwrap_or(0) });
+                        emit(DictEvent::Done { text: crate::respell::respell(m["text"].as_str().unwrap_or("")), service: m["service"].as_str().map(String::from), audio_ms: m["audioMs"].as_u64().unwrap_or(0) });
                         break;
                     }
                     _ => {}
