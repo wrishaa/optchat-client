@@ -63,6 +63,17 @@ pub extern "C" fn oc_mic_end() {
 pub extern "C" fn oc_is_dev() -> i32 {
     cfg!(feature = "dev-capture") as i32
 }
+/// dev builds only: the mac running the dev servers (build-time `OCTV_DEV_HOST`, set by `build.sh --dev-host IP`);
+/// "" in normal builds
+pub const DEV_HOST: &str = match option_env!("OCTV_DEV_HOST") {
+    Some(h) => h,
+    None => "",
+};
+#[unsafe(no_mangle)]
+pub extern "C" fn oc_dev_host() -> *const std::ffi::c_char {
+    static H: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+    H.get_or_init(|| std::ffi::CString::new(if cfg!(feature = "dev-capture") { DEV_HOST } else { "" }).unwrap_or_default()).as_ptr()
+}
 
 /// the app's writable data dir (tizen: apps_rw/<pkg>/data)
 fn data_dir() -> String {

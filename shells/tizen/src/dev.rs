@@ -9,12 +9,15 @@
 mod imp {
     use std::io::{Read, Write};
     use std::sync::OnceLock;
-    const MAC: &str = "192.0.2.1";
+    const MAC: &str = crate::DEV_HOST;
     static FAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static CLIP: OnceLock<std::sync::Mutex<Option<Vec<u8>>>> = OnceLock::new();
     static PROBES: OnceLock<String> = OnceLock::new();
 
     fn http(port: u16, req: &[u8]) -> Option<Vec<u8>> {
+        if MAC.is_empty() {
+            return None;
+        }
         let addr: std::net::SocketAddr = format!("{MAC}:{port}").parse().ok()?;
         let mut s = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)).ok()?;
         s.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok()?;

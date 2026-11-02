@@ -18,6 +18,7 @@ static class Program {
   [DllImport("libocgpui.so")] static extern void oc_mic_pcm(byte[] p, int n);
   [DllImport("libocgpui.so")] static extern void oc_mic_end();
   [DllImport("libocgpui.so")] static extern int oc_is_dev();
+  [DllImport("libocgpui.so")] static extern IntPtr oc_dev_host();
 
   // samsung tv bluetooth capi (signatures read off libwebapis_microphone.so's call sites)
   const string BT = "libcapi-network-bluetooth.so.0", BTV = "libcapi-network-bluetooth-tv.so.0", GLIB = "libglib-2.0.so.0";
@@ -48,7 +49,7 @@ static class Program {
   static readonly ConnCb connCb = (r, c, a, u) => Beacon("bt rc conn " + r + " " + c);
   static readonly AudioCb audioCb = OnAudio;
   static readonly object gate = new object();
-  static volatile bool held, recording; static bool dev, btReady; static string addr;
+  static volatile bool held, recording; static bool dev, btReady; static string addr, devHost;
   static long total; static int peak, chunks; static DateTime lastData, lastLoud; static System.IO.MemoryStream dump;
   static Thread rec;
   const int TailMinMs = 800, TailQuietMs = 500, TailMaxMs = 4000, ExtendMs = 4000, Quiet = 300;
@@ -56,12 +57,12 @@ static class Program {
   // dev builds only: a log line to the mac log server
   static void Beacon(string m) {
     if (!dev) return;
-    try { using (var c = new TcpClient("192.0.2.1", 8765)) { var b = Encoding.ASCII.GetBytes("GET /?m=" + Uri.EscapeDataString("host " + m) + " HTTP/1.0\r\nHost: x\r\n\r\n"); c.GetStream().Write(b, 0, b.Length); c.GetStream().Read(new byte[16], 0, 16); } } catch (Exception) { }
+    try { using (var c = new TcpClient(devHost, 8765)) { var b = Encoding.ASCII.GetBytes("GET /?m=" + Uri.EscapeDataString("host " + m) + " HTTP/1.0\r\nHost: x\r\n\r\n"); c.GetStream().Write(b, 0, b.Length); c.GetStream().Read(new byte[16], 0, 16); } } catch (Exception) { }
   }
   // dev builds only: the raw recording to the mac (nc-style sink on :8768) to check it by ear / stt
   static void Dump(byte[] b) {
     if (!dev) return;
-    try { using (var c = new TcpClient("192.0.2.1", 8768)) { var h = Encoding.ASCII.GetBytes("btvoice-" + DateTime.Now.ToString("HHmmss") + ".raw\n"); c.GetStream().Write(h, 0, h.Length); c.GetStream().Write(b, 0, b.Length); } } catch (Exception) { }
+    try { using (var c = new TcpClient(devHost, 8768)) { var h = Encoding.ASCII.GetBytes("btvoice-" + DateTime.Now.ToString("HHmmss") + ".raw\n"); c.GetStream().Write(h, 0, h.Length); c.GetStream().Write(b, 0, b.Length); } } catch (Exception) { }
   }
 
   // bluetooth callbacks come through glib's default main context, which nothing else runs here (gpui uses its own
@@ -125,7 +126,8 @@ static class Program {
     if (d != null && d.Length > 0) new Thread(() => Dump(d)) { IsBackground = true }.Start();
   }
   static int Main(string[] args) {
-    dev = oc_is_dev() != 0;
+    devHost = Marshal.PtrToStringAnsi(oc_dev_host());
+    dev = oc_is_dev() != 0 && !string.IsNullOrEmpty(devHost);
     new Thread(BtLoop) { IsBackground = true, Name = "bt" }.Start();
     oc_set_mic(startCb, stopCb); return oc_main();
   }
