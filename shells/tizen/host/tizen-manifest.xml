@@ -8,5 +8,7 @@
   <privileges>
     <privilege>http://tizen.org/privilege/internet</privilege>
     <privilege>http://tizen.org/privilege/recorder</privilege>
+    <privilege>http://tizen.org/privilege/bluetooth</privilege>
+    <privilege>http://developer.samsung.com/privilege/microphone</privilege>
   </privileges>
 </manifest>
