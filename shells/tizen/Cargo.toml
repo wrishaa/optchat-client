@@ -14,3 +14,11 @@ path = "src/lib.rs"
 gpui.workspace = true
 log.workspace = true
 gpui_platform = { workspace = true, features = ["wayland", "tizen"] }
+gpui_wgpu = { path = "../../vendor/zed/crates/gpui_wgpu", optional = true }
+image = { workspace = true, optional = true }
+
+[features]
+default = []
+# dev-only screenshot path: the shell polls the mac capture server (scripts/capsrv.py, :8767) and posts png frames.
+# build with `build.sh --dev-capture`; never on in normal builds.
+dev-capture = ["gpui_wgpu/frame-capture", "dep:image"]

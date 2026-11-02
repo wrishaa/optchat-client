@@ -19,6 +19,54 @@ index a91818a..558a9f3 100644
  wayland-cursor = { version = "0.31.11", optional = true }
  wayland-protocols = { version = "0.32.9", features = [
      "client",
+diff --git a/crates/gpui_linux/protocols/tizen-keyrouter.xml b/crates/gpui_linux/protocols/tizen-keyrouter.xml
+new file mode 100644
+index 0000000..9d43a4a
+--- /dev/null
++++ b/crates/gpui_linux/protocols/tizen-keyrouter.xml
+@@ -0,0 +1,42 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!-- minimal subset of tizen_keyrouter (tizen-extension.xml): only the v1 grab requests/event, in their original order -->
++<protocol name="tizen_keyrouter_min">
++  <interface name="tizen_keyrouter" version="1">
++    <enum name="error">
++      <entry name="none" value="0"/>
++      <entry name="no_permission" value="1"/>
++      <entry name="invalid_surface" value="2"/>
++      <entry name="invalid_key" value="3"/>
++      <entry name="invalid_mode" value="4"/>
++      <entry name="grabbed_already" value="5"/>
++      <entry name="invalid_array" value="6"/>
++    </enum>
++    <enum name="mode">
++      <entry name="none" value="0"/>
++      <entry name="shared" value="1"/>
++      <entry name="topmost" value="2"/>
++      <entry name="overridable_exclusive" value="3"/>
++      <entry name="exclusive" value="4"/>
++      <entry name="registered" value="5"/>
++    </enum>
++    <request name="set_keygrab">
++      <arg name="surface" type="object" interface="wl_surface" allow-null="true"/>
++      <arg name="key" type="uint"/>
++      <arg name="mode" type="uint"/>
++    </request>
++    <request name="unset_keygrab">
++      <arg name="surface" type="object" interface="wl_surface" allow-null="true"/>
++      <arg name="key" type="uint"/>
++    </request>
++    <request name="get_keygrab_status">
++      <arg name="surface" type="object" interface="wl_surface" allow-null="true"/>
++      <arg name="key" type="uint"/>
++    </request>
++    <event name="keygrab_notify">
++      <arg name="surface" type="object" interface="wl_surface" allow-null="true"/>
++      <arg name="key" type="uint"/>
++      <arg name="mode" type="uint"/>
++      <arg name="error" type="uint"/>
++    </event>
++  </interface>
++</protocol>
 diff --git a/crates/gpui_linux/protocols/xdg-shell-unstable-v6.xml b/crates/gpui_linux/protocols/xdg-shell-unstable-v6.xml
 new file mode 100644
 index 0000000..7fb4658
@@ -1101,7 +1149,7 @@ index cbc962b..c75810f 100644
  /// Contains Types for configuring layer_shell surfaces.
  pub mod layer_shell;
 diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/src/linux/wayland/client.rs
-index 84f4d0f..1ac459a 100644
+index 84f4d0f..38dbbc4 100644
 --- a/crates/gpui_linux/src/linux/wayland/client.rs
 +++ b/crates/gpui_linux/src/linux/wayland/client.rs
 @@ -62,7 +62,7 @@ use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xd
@@ -1113,7 +1161,16 @@ index 84f4d0f..1ac459a 100644
      xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
  };
  use wayland_protocols::xdg::system_bell::v1::client::xdg_system_bell_v1;
-@@ -297,7 +297,7 @@ impl Globals {
+@@ -258,6 +258,8 @@ pub struct Globals {
+     pub gesture_manager: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+     pub dialog: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
+     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
++    #[cfg(feature = "tizen")]
++    pub keyrouter: Option<super::xdg_compat::keyrouter::tizen_keyrouter::TizenKeyrouter>,
+     pub executor: ForegroundExecutor,
+     pub frame_ping: Ping,
+ }
+@@ -297,7 +299,7 @@ impl Globals {
              // Accept any xdg_wm_base version up to 6, which added the `suspended`
              // toplevel state; older compositors bind at their own version.
              wm_base: globals
@@ -1122,7 +1179,19 @@ index 84f4d0f..1ac459a 100644
                  .context("Wayland compositor does not provide xdg_wm_base")?,
              viewporter: globals.bind(&qh, 1..=1, ()).ok(),
              fractional_scale_manager: globals.bind(&qh, 1..=1, ()).ok(),
-@@ -931,7 +931,8 @@ fn wayland_socket_path(environment: &GraphicalEnvironment) -> anyhow::Result<Pat
+@@ -308,6 +310,11 @@ impl Globals {
+             gesture_manager: globals.bind(&qh, 1..=3, ()).ok(),
+             dialog: globals.bind(&qh, dialog_v..=dialog_v, ()).ok(),
+             system_bell: globals.bind(&qh, 1..=1, ()).ok(),
++            #[cfg(feature = "tizen")]
++            keyrouter: {
++                globals.contents().with_list(|l| log::info!("tizen wl globals: {}", l.iter().map(|g| format!("{}@{}", g.interface, g.version)).collect::<Vec<_>>().join(" ")));
++                globals.bind(&qh, 1..=1, ()).map_err(|e| log::info!("tizen keyrouter bind failed: {e}")).ok()
++            },
+             executor,
+             qh,
+             frame_ping,
+@@ -931,7 +938,8 @@ fn wayland_socket_path(environment: &GraphicalEnvironment) -> anyhow::Result<Pat
  
  fn wl_seat_version(version: u32) -> anyhow::Result<u32> {
      // We rely on the wl_pointer.frame event
@@ -1132,6 +1201,78 @@ index 84f4d0f..1ac459a 100644
      const WL_SEAT_MAX_VERSION: u32 = 9;
  
      if version < WL_SEAT_MIN_VERSION {
+@@ -1917,6 +1925,48 @@ impl Dispatch<xdg_popup::XdgPopup, ObjectId> for WaylandClientStatePtr {
+     }
+ }
+ 
++#[cfg(feature = "tizen")]
++impl Dispatch<super::xdg_compat::keyrouter::tizen_keyrouter::TizenKeyrouter, ()> for WaylandClientStatePtr {
++    fn event(
++        _: &mut Self,
++        kr: &super::xdg_compat::keyrouter::tizen_keyrouter::TizenKeyrouter,
++        event: super::xdg_compat::keyrouter::tizen_keyrouter::Event,
++        _: &(),
++        _: &Connection,
++        _: &QueueHandle<Self>,
++    ) {
++        let super::xdg_compat::keyrouter::tizen_keyrouter::Event::KeygrabNotify { surface, key, mode, error } = event;
++        log::info!("tizen keygrab notify key={key} mode={mode} error={error}");
++        // exclusive is usually held by the tv's voice assistant; fall back: exclusive 4 -> overridable 3 -> topmost 2 -> registered 5 -> shared 1
++        let next = match mode { 4 => Some(3), 3 => Some(2), 2 => Some(5), 5 => Some(1), _ => None };
++        if error != 0 { if let Some(m) = next { kr.set_keygrab(surface.as_ref(), key, m); } }
++    }
++}
++
++/// keys the tizen tv shell keeps unless the app grabs them (remote mic buttons). override with OC_TIZEN_GRAB="a,b".
++#[cfg(feature = "tizen")]
++fn tizen_grab_keys(state: &WaylandClientState, surface: &wl_surface::WlSurface) {
++    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++    let (Some(kr), Some(ks)) = (state.globals.keyrouter.as_ref(), state.keymap_state.as_ref()) else { return };
++    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
++    let names = std::env::var("OC_TIZEN_GRAB").unwrap_or_else(|_| "XF86BTVoice,XF86BTFarVoice".into());
++    let mode: u32 = std::env::var("OC_TIZEN_GRAB_MODE").ok().and_then(|m| m.parse().ok()).unwrap_or(4);
++    let keymap = ks.get_keymap();
++    for name in names.split(',') {
++        let sym = xkb::keysym_from_name(name, xkb::KEYSYM_NO_FLAGS);
++        let mut found = false;
++        if sym.raw() == 0 { log::info!("tizen keygrab {name}: unknown keysym name"); continue; }
++        for code in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
++            if ks.key_get_one_sym(Keycode::from(code)) == sym {
++                log::info!("tizen keygrab {name} keycode={code} mode={mode}");
++                kr.set_keygrab(Some(surface), code, mode);
++                found = true;
++            }
++        }
++        if !found { log::info!("tizen keygrab {name}: no keycode in keymap (sym {:?})", sym.raw()); }
++    }
++}
++
+ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for WaylandClientStatePtr {
+     fn event(
+         _: &mut Self,
+@@ -2086,6 +2136,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                 this.handle_keyboard_layout_change();
+             }
+             wl_keyboard::Event::Enter { surface, .. } => {
++                #[cfg(feature = "tizen")]
++                tizen_grab_keys(&state, &surface);
+                 state.keyboard_focused_window = get_window(&mut state, &surface.id());
+                 state.enter_token = Some(());
+ 
+@@ -2153,6 +2205,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                     state.serial_tracker.update(SerialKind::KeyPress, serial);
+                 }
+ 
++                #[cfg(feature = "tizen")]
++                log::info!(
++                    "tizen key raw={key} state={key_state:?} focused={} keymap={} sym={:?}",
++                    state.keyboard_focused_window.is_some(),
++                    state.keymap_state.is_some(),
++                    state.keymap_state.as_ref().map(|k| k.key_get_one_sym(Keycode::from(key + MIN_KEYCODE)).raw())
++                );
+                 let focused_window = state.keyboard_focused_window.clone();
+                 let Some(focused_window) = focused_window else {
+                     return;
 diff --git a/crates/gpui_linux/src/linux/wayland/popup.rs b/crates/gpui_linux/src/linux/wayland/popup.rs
 index 4a15e78..0bd3209 100644
 --- a/crates/gpui_linux/src/linux/wayland/popup.rs
@@ -1327,10 +1468,10 @@ index 8d92234..bcb5678 100644
      }
 diff --git a/crates/gpui_linux/src/linux/wayland/xdg_compat.rs b/crates/gpui_linux/src/linux/wayland/xdg_compat.rs
 new file mode 100644
-index 0000000..c54beed
+index 0000000..2c39033
 --- /dev/null
 +++ b/crates/gpui_linux/src/linux/wayland/xdg_compat.rs
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,44 @@
 +//! xdg-shell, or on samsung tizen tvs (feature `tizen`) xdg-shell unstable v6 under the stable names.
 +//! tizen 9's compositor offers zxdg_shell_v6 but no xdg_wm_base; the two protocols match closely enough
 +//! for gpui's toplevel use. popups/positioners are not mapped for tizen (no popups on the tv shell).
@@ -1361,6 +1502,20 @@ index 0000000..c54beed
 +pub mod xdg_popup { pub use super::v6::zxdg_popup_v6::*; pub type XdgPopup = ZxdgPopupV6; }
 +#[cfg(feature = "tizen")]
 +pub mod xdg_positioner { pub use super::v6::zxdg_positioner_v6::*; pub type XdgPositioner = ZxdgPositionerV6; }
++
++/// tizen tv key grabs (the mic button XF86BTVoice and other keys the tv shell keeps unless an app grabs them).
++#[cfg(feature = "tizen")]
++#[allow(missing_docs, non_upper_case_globals, non_camel_case_types, unused_imports, dead_code, clippy::all)]
++pub mod keyrouter {
++    use wayland_client;
++    use wayland_client::protocol::*;
++    pub mod __interfaces {
++        use wayland_client::protocol::__interfaces::*;
++        wayland_scanner::generate_interfaces!("protocols/tizen-keyrouter.xml");
++    }
++    use self::__interfaces::*;
++    wayland_scanner::generate_client_code!("protocols/tizen-keyrouter.xml");
++}
 diff --git a/crates/gpui_platform/Cargo.toml b/crates/gpui_platform/Cargo.toml
 index 540a574..79f52b6 100644
 --- a/crates/gpui_platform/Cargo.toml
@@ -1373,6 +1528,55 @@ index 540a574..79f52b6 100644
  x11 = ["gpui_linux/x11"]
  
  [[bench]]
+diff --git a/crates/gpui_wgpu/Cargo.toml b/crates/gpui_wgpu/Cargo.toml
+index 179b134..4e81f3a 100644
+--- a/crates/gpui_wgpu/Cargo.toml
++++ b/crates/gpui_wgpu/Cargo.toml
+@@ -16,6 +16,8 @@ doctest = false
+ default = []
+ bench-support = ["gpui/bench-support", "dep:image"]
+ font-kit = ["dep:font-kit"]
++# dev-only: screenshot readback of presented frames (see src/frame_capture.rs)
++frame-capture = []
+ test-support = ["gpui/test-support", "dep:image"]
+ 
+ [dependencies]
+diff --git a/crates/gpui_wgpu/src/frame_capture.rs b/crates/gpui_wgpu/src/frame_capture.rs
+new file mode 100644
+index 0000000..c4084bf
+--- /dev/null
++++ b/crates/gpui_wgpu/src/frame_capture.rs
+@@ -0,0 +1,19 @@
++//! dev-only frame readback (feature `frame-capture`, off by default): after a frame is presented, if a capture
++//! was requested, re-render the same scene into an offscreen COPY_SRC texture and hand RGBA8 rows to a sink.
++//! used by the tizen tv shell to screenshot itself (the tv has no capture tool we can reach).
++use std::sync::OnceLock;
++use std::sync::atomic::{AtomicBool, Ordering};
++
++/// sink(width, height, rgba8 pixels, tightly packed)
++pub type CaptureSink = fn(u32, u32, Vec<u8>);
++static SINK: OnceLock<CaptureSink> = OnceLock::new();
++static WANT: AtomicBool = AtomicBool::new(false);
++
++/// install the sink once; later calls are ignored.
++pub fn set_capture_sink(sink: CaptureSink) { let _ = SINK.set(sink); }
++/// capture the next drawn frame (the caller should also refresh the window so a frame gets drawn).
++pub fn request_capture() { WANT.store(true, Ordering::SeqCst); }
++pub(crate) fn take_request() -> Option<CaptureSink> {
++    let sink = *SINK.get()?;
++    WANT.swap(false, Ordering::SeqCst).then_some(sink)
++}
+diff --git a/crates/gpui_wgpu/src/gpui_wgpu.rs b/crates/gpui_wgpu/src/gpui_wgpu.rs
+index 29a79af..2c85eb6 100644
+--- a/crates/gpui_wgpu/src/gpui_wgpu.rs
++++ b/crates/gpui_wgpu/src/gpui_wgpu.rs
+@@ -1,4 +1,6 @@
+ mod cosmic_text_system;
++#[cfg(feature = "frame-capture")]
++pub mod frame_capture;
+ mod wgpu_atlas;
+ mod wgpu_context;
+ mod wgpu_renderer;
 diff --git a/crates/gpui_wgpu/src/wgpu_context.rs b/crates/gpui_wgpu/src/wgpu_context.rs
 index 4c55ef1..5920fea 100644
 --- a/crates/gpui_wgpu/src/wgpu_context.rs
@@ -1393,3 +1597,76 @@ index 4c55ef1..5920fea 100644
      }
  
      pub fn supports_dual_source_blending(&self) -> bool {
+diff --git a/crates/gpui_wgpu/src/wgpu_renderer.rs b/crates/gpui_wgpu/src/wgpu_renderer.rs
+index 8387528..bfb081f 100644
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -1208,10 +1208,68 @@ impl WgpuRenderer {
+         }
+ 
+         frame.present();
++        #[cfg(feature = "frame-capture")]
++        if let Some(sink) = crate::frame_capture::take_request() {
++            match core.capture_frame(scene, size, premultiplied_alpha) {
++                Ok((w, h, px)) => sink(w, h, px),
++                Err(error) => log::error!("frame capture failed: {error:#}"),
++            }
++        }
+         true
+     }
+ }
+ 
++#[cfg(feature = "frame-capture")]
++impl WgpuRendererCore {
++    /// dev-only: render `scene` again into an offscreen COPY_SRC texture and read it back as tight RGBA8.
++    fn capture_frame(&mut self, scene: &Scene, size: Size<DevicePixels>, premultiplied_alpha: bool) -> Result<(u32, u32, Vec<u8>)> {
++        let (width, height) = (size.width.0 as u32, size.height.0 as u32);
++        let device = self.resources.device.clone();
++        let texture = device.create_texture(&wgpu::TextureDescriptor {
++            label: Some("frame_capture_target"),
++            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
++            mip_level_count: 1,
++            sample_count: 1,
++            dimension: wgpu::TextureDimension::D2,
++            format: self.target_format,
++            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
++            view_formats: &[],
++        });
++        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
++        self.render_frame(scene, &view, size, premultiplied_alpha, wgpu::Color::BLACK)?;
++        let row = width * 4;
++        let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
++        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
++            label: Some("frame_capture_readback"),
++            size: u64::from(padded) * u64::from(height),
++            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
++            mapped_at_creation: false,
++        });
++        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame_capture_encoder") });
++        encoder.copy_texture_to_buffer(
++            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
++            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(height) } },
++            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
++        );
++        let submission = self.resources.queue.submit(std::iter::once(encoder.finish()));
++        let (tx, rx) = std::sync::mpsc::channel();
++        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
++        device
++            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: Some(std::time::Duration::from_secs(10)) })
++            .map_err(|e| anyhow::anyhow!("capture poll: {e}"))?;
++        rx.recv_timeout(std::time::Duration::from_secs(10))?.map_err(|e| anyhow::anyhow!("capture map: {e}"))?;
++        let mapped = buffer.slice(..).get_mapped_range();
++        let mut pixels = Vec::with_capacity((row * height) as usize);
++        for r in mapped.chunks_exact(padded as usize).take(height as usize) { pixels.extend_from_slice(&r[..row as usize]); }
++        drop(mapped);
++        buffer.unmap();
++        if matches!(self.target_format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
++            for p in pixels.chunks_exact_mut(4) { p.swap(0, 2); }
++        }
++        Ok((width, height, pixels))
++    }
++}
++
+ impl WgpuRendererCore {
+     fn new(
+         context: &WgpuContext,
