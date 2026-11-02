@@ -3875,6 +3875,13 @@ dependencies = [
  "gpui_wgpu",
  "image",
  "log",
+ "optchat-client",
+ "optchat-platform",
+ "optchat-ui",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

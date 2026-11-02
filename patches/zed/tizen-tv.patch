@@ -1340,7 +1340,7 @@ index 4a15e78..0bd3209 100644
 +    }
 +}
 diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
-index 8d92234..bcb5678 100644
+index 8d92234..c3fdcf6 100644
 --- a/crates/gpui_linux/src/linux/wayland/window.rs
 +++ b/crates/gpui_linux/src/linux/wayland/window.rs
 @@ -20,10 +20,10 @@ use wayland_client::{
@@ -1414,7 +1414,54 @@ index 8d92234..bcb5678 100644
          if let WaylandSurfaceState::Popup(WaylandPopupSurfaceState {
              xdg_popup,
              options,
-@@ -1242,16 +1260,21 @@ impl WaylandWindowStatePtr {
+@@ -565,6 +583,10 @@ impl WaylandWindowState {
+         options: WindowParams,
+         parent: Option<WaylandWindowStatePtr>,
+     ) -> anyhow::Result<Self> {
++        #[cfg(feature = "tizen")]
++        let initial_scale = tizen_scale();
++        #[cfg(not(feature = "tizen"))]
++        let initial_scale = 1.0f32;
+         let renderer = {
+             let raw_window = RawWindow {
+                 window: surface.id().as_ptr().cast::<c_void>(),
+@@ -577,8 +599,9 @@ impl WaylandWindowState {
+             };
+             let config = WgpuSurfaceConfig {
+                 size: Size {
+-                    width: DevicePixels(f32::from(options.bounds.size.width) as i32),
+-                    height: DevicePixels(f32::from(options.bounds.size.height) as i32),
++                    // the drawable is in device pixels: the logical size at the tv's scale (1 elsewhere)
++                    width: DevicePixels((f32::from(options.bounds.size.width) * initial_scale) as i32),
++                    height: DevicePixels((f32::from(options.bounds.size.height) * initial_scale) as i32),
+                 },
+                 transparent: true,
+                 // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
+@@ -617,6 +640,9 @@ impl WaylandWindowState {
+             display: None,
+             renderer: Some(renderer),
+             bounds: options.bounds,
++            #[cfg(feature = "tizen")]
++            scale: tizen_scale(),
++            #[cfg(not(feature = "tizen"))]
+             scale: 1.0,
+             input_handler: None,
+             decorations: WindowDecorations::Client,
+@@ -1139,6 +1165,13 @@ impl WaylandWindowStatePtr {
+                         return;
+                     }
+                     if let Some(size) = configure.size {
++                        #[cfg(feature = "tizen")]
++                        {
++                            // surface pixels -> the ui's logical size at the tv's one scale
++                            let k = tizen_scale();
++                            self.set_size_and_scale(Some(gpui::size(gpui::px(f32::from(size.width) / k), gpui::px(f32::from(size.height) / k))), Some(k));
++                        }
++                        #[cfg(not(feature = "tizen"))]
+                         self.resize(size);
+                     }
+                 }
+@@ -1242,16 +1275,21 @@ impl WaylandWindowStatePtr {
                              fullscreen = true;
                          }
                          xdg_toplevel::State::Resizing => resizing = true,
@@ -1436,7 +1483,7 @@ index 8d92234..bcb5678 100644
                          xdg_toplevel::State::TiledBottom => {
                              tiling.bottom = true;
                          }
-@@ -1291,6 +1314,7 @@ impl WaylandWindowStatePtr {
+@@ -1291,6 +1329,7 @@ impl WaylandWindowStatePtr {
                      true
                  }
              }
@@ -1444,7 +1491,7 @@ index 8d92234..bcb5678 100644
              xdg_toplevel::Event::WmCapabilities { capabilities } => {
                  let mut window_controls = WindowControls {
                      maximize: false,
-@@ -1389,7 +1413,10 @@ impl WaylandWindowStatePtr {
+@@ -1389,7 +1428,10 @@ impl WaylandWindowStatePtr {
              }
              xdg_popup::Event::PopupDone => true,
              // Precedes the reposition's Configure, which does the work. The token is not needed.
@@ -1455,7 +1502,19 @@ index 8d92234..bcb5678 100644
              _ => false,
          }
      }
-@@ -2105,7 +2132,10 @@ impl PlatformWindow for WaylandWindow {
+@@ -1545,6 +1587,11 @@ impl WaylandWindowStatePtr {
+     }
+ 
+     pub fn rescale(&self, scale: f32) {
++        #[cfg(feature = "tizen")]
++        let scale = {
++            let _ = scale;
++            tizen_scale() // the tv's outputs say 1; the ui keeps its own scale
++        };
+         self.set_size_and_scale(None, Some(scale));
+     }
+ 
+@@ -2105,7 +2152,10 @@ impl PlatformWindow for WaylandWindow {
              toplevel.resize(
                  &state.globals.seat,
                  state.client.get_serial(SerialKind::MousePress).as_raw(),
@@ -1466,6 +1525,19 @@ index 8d92234..bcb5678 100644
              )
          }
      }
+@@ -2414,3 +2464,12 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
+ 
+     bounds
+ }
++
++/// Tizen tvs: one ui scale for the whole window (GPUI_TIZEN_SCALE, default 1). The tv's compositor has neither
++/// wp_viewporter nor fractional scale, so the ui lays out at the surface size / scale and draws the full-size buffer
++/// at buffer scale 1 (a 1920×1080 surface at 1.5 is a 1280×720 ui, sharp).
++#[cfg(feature = "tizen")]
++pub(crate) fn tizen_scale() -> f32 {
++    static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
++    *S.get_or_init(|| std::env::var("GPUI_TIZEN_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| (1.0..=4.0).contains(v)).unwrap_or(1.0))
++}
 diff --git a/crates/gpui_linux/src/linux/wayland/xdg_compat.rs b/crates/gpui_linux/src/linux/wayland/xdg_compat.rs
 new file mode 100644
 index 0000000..2c39033

@@ -3,8 +3,8 @@ name = "optchat-tizen"
 edition.workspace = true
 version.workspace = true
 
-# samsung tizen tv shell (poc): a cdylib the c# host (shells/tizen/host) loads and calls oc_main() on.
-# milestone 1 = one gpui window, a colored rect and one line of text, nothing else.
+# OptChat for samsung tizen tvs: the shared UI (optchat-ui) in a thin shell (src/lib.rs, like shells/mac), as a cdylib
+# the c# host (shells/tizen/host) loads and calls oc_main() on. The mic comes from the host (platform.rs), not cpal.
 [lib]
 name = "ocgpui"
 crate-type = ["cdylib"]
@@ -12,13 +12,20 @@ path = "src/lib.rs"
 
 [dependencies]
 gpui.workspace = true
-log.workspace = true
 gpui_platform = { workspace = true, features = ["wayland", "tizen"] }
 gpui_wgpu = { path = "../../vendor/zed/crates/gpui_wgpu", optional = true }
 image = { workspace = true, optional = true }
+optchat-platform.workspace = true
+optchat-ui.workspace = true
+optchat-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+log.workspace = true
 
 [features]
 default = []
-# dev-only screenshot path: the shell polls the mac capture server (scripts/capsrv.py, :8767) and posts png frames.
-# build with `build.sh --dev-capture`; never on in normal builds.
+# dev-only: screenshots, the ui test channel, a recorded clip as the mic, log lines, all through the mac dev server
+# (optchat-scratch/tizen/scripts/devsrv.py). build with `build.sh --dev-capture`; never on in normal builds.
 dev-capture = ["gpui_wgpu/frame-capture", "dep:image"]

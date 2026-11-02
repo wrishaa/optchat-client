@@ -29,7 +29,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 optchat-proto = { path = "crates/proto" }
 optchat-theme = { path = "crates/theme" }
 optchat-platform = { path = "crates/platform" }
-optchat-client = { path = "crates/client" }
+optchat-client = { path = "crates/client", default-features = false } # shells pick "cpal" (the default input device)
 optchat-ui = { path = "crates/ui" }
 # GPUI: one pin for every platform. zed-industries/zed branch gpui-ios-platform (zed#63068) at 97dc71d; the crates
 # resolve to vendor/zed (below), a git submodule at that commit, with patches/zed/*.patch applied by tools/zed-vendor.sh.

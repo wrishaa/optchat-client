@@ -9,3 +9,4 @@ export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$TZ_ROOT
 export PKG_CONFIG_LIBDIR=$TZ_ROOT/usr/lib/pkgconfig:$HOME/optchat-scratch/native/tv/stubs/pc
 export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_RUSTFLAGS="-L $HOME/optchat-scratch/native/tv/stubs/lib -C link-arg=-Wl,--allow-shlib-undefined"
 export RUST_FONTCONFIG_DLOPEN=1
+export OPENSSL_LIB_DIR=$TZ_ROOT/usr/lib OPENSSL_INCLUDE_DIR=$TZ_ROOT/usr/include

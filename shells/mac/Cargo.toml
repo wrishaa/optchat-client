@@ -13,7 +13,7 @@ gpui.workspace = true
 gpui_platform = { workspace = true, features = ["runtime_shaders", "font-kit"] }
 optchat-platform = { workspace = true, features = ["apple-keychain"] }
 optchat-ui.workspace = true
-optchat-client.workspace = true
+optchat-client = { workspace = true, features = ["cpal"] }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

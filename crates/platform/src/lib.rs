@@ -18,7 +18,18 @@ pub trait SecureStore: Send + Sync {
     fn delete(&self, key: &str);
 }
 
+/// A microphone the shell owns (an OS audio API the shared crates can't call, e.g. tizen's AudioCapture fed by the tv
+/// remote's mic): pcm16 LE, 16 kHz, mono, any chunk size. `stop` returns once the last audio has been delivered.
+pub trait MicSource: Send + Sync {
+    fn start(&self, on_pcm: Arc<dyn Fn(&[u8]) + Send + Sync>) -> Result<(), String>;
+    fn stop(&self);
+}
+
 pub trait Platform: Send + Sync + 'static {
+    /// the shell's own microphone, used instead of the default input device (cpal) when present
+    fn mic(&self) -> Option<Arc<dyn MicSource>> {
+        None
+    }
     /// the OS's secure store for client tokens
     fn secure_store(&self) -> Option<Arc<dyn SecureStore>> {
         None
@@ -49,6 +60,9 @@ pub fn get() -> Option<&'static Arc<dyn Platform>> {
 }
 pub fn secure_store() -> Option<Arc<dyn SecureStore>> {
     get().and_then(|p| p.secure_store())
+}
+pub fn mic() -> Option<Arc<dyn MicSource>> {
+    get().and_then(|p| p.mic())
 }
 pub fn resident_mb() -> f64 {
     get().and_then(|p| p.resident_mb()).unwrap_or(0.0)

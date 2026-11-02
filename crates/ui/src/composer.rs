@@ -121,6 +121,9 @@ impl Composer {
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::tv::enabled() {
+            return; // the TV's text field never takes focus: no on-screen keyboard; text comes from dictation
+        }
         self.input.update(cx, |i, cx| i.focus(window, cx));
     }
 

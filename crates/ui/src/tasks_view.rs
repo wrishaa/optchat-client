@@ -43,15 +43,11 @@ impl TasksPanel {
     }
 }
 
-pub fn render(w: &mut TasksPanel, _window: &mut Window, cx: &mut Context<TasksPanel>) -> impl IntoElement {
-    let k = c(cx).clone();
-    let s = w.state.read(cx);
-    let mut list = div().flex().flex_col().pb(px(16.)).px(px(6.));
-    if s.tasks.get(&s.current).is_none() || s.tasks.get(&0).is_none() {
-        return list.child(skeleton_line(None, cx)).child(skeleton_line(Some(160.), cx)).child(skeleton_line(None, cx));
-    }
+/// the rows the Tasks view shows, top to bottom: (task, depth, on the path above the current task). Finished tasks are
+/// hidden unless "show ended" is on (always hidden on the TV), except the current one.
+pub fn visible_rows(s: &AppState, collapsed: &std::collections::HashSet<i64>) -> Vec<(TaskInfo, usize, bool)> {
     let mut rows: Vec<(TaskInfo, usize, bool)> = vec![];
-    let show_ended = s.prefs.show_ended;
+    let show_ended = s.prefs.show_ended && !crate::tv::enabled();
     let cur = s.current;
     fn walk(s: &AppState, id: i64, depth: usize, closed: &std::collections::HashSet<i64>, show_ended: bool, cur: i64, out: &mut Vec<(TaskInfo, usize, bool)>) {
         let Some(x) = s.tasks.get(&id) else { return };
@@ -60,21 +56,33 @@ pub fn render(w: &mut TasksPanel, _window: &mut Window, cx: &mut Context<TasksPa
             return;
         }
         for c in s.children_of(id) {
-            if show_ended || !c.task.status.terminal() || c.task.id == cur {
+            if show_ended || !c.task.status.terminal() || c.task.id == cur || s.ancestors(cur).iter().any(|a| a.task.id == c.task.id) {
                 walk(s, c.task.id, depth + 1, closed, show_ended, cur, out);
             }
         }
     }
-    if s.prefs.task_scope_all {
-        walk(s, 0, 0, &w.collapsed, show_ended, cur, &mut rows);
+    if s.prefs.task_scope_all || crate::tv::enabled() {
+        walk(s, 0, 0, collapsed, show_ended, cur, &mut rows);
     } else {
         let up = s.ancestors(cur);
         let n = up.len();
         for (d, x) in up.into_iter().enumerate() {
             rows.push((x.clone(), d, true));
         }
-        walk(s, cur, n, &w.collapsed, show_ended, cur, &mut rows);
+        walk(s, cur, n, collapsed, show_ended, cur, &mut rows);
     }
+    rows
+}
+
+pub fn render(w: &mut TasksPanel, _window: &mut Window, cx: &mut Context<TasksPanel>) -> impl IntoElement {
+    let k = c(cx).clone();
+    let s = w.state.read(cx);
+    let mut list = div().flex().flex_col().pb(px(16.)).px(px(6.));
+    if s.tasks.get(&s.current).is_none() || s.tasks.get(&0).is_none() {
+        return list.child(skeleton_line(None, cx)).child(skeleton_line(Some(160.), cx)).child(skeleton_line(None, cx));
+    }
+    let cur = s.current;
+    let rows = visible_rows(s, &w.collapsed);
     let no_kids = s.children_of(cur).is_empty();
     let up_n = if s.prefs.task_scope_all { 0 } else { s.ancestors(cur).len() };
     let scope_all = s.prefs.task_scope_all;
@@ -95,7 +103,7 @@ fn row(w: &TasksPanel, x: &TaskInfo, depth: usize, path: bool, cx: &mut Context<
     let id = t.id;
     let is_cur = id == s.current;
     let ended = t.status.terminal();
-    let kids = if path { 0 } else { s.children_of(id).iter().filter(|c| s.prefs.show_ended || !c.task.status.terminal() || c.task.id == s.current).count() };
+    let kids = if path { 0 } else { s.children_of(id).iter().filter(|c| (s.prefs.show_ended && !crate::tv::enabled()) || !c.task.status.terminal() || c.task.id == s.current).count() };
     let open = !w.collapsed.contains(&id);
     let usd = sub(Some(x), "usd");
     let active = sub(Some(x), "time.active");

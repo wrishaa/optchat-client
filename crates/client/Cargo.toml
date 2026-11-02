@@ -22,5 +22,10 @@ reqwest = { version = "0.12", default-features = false, features = ["native-tls"
 base64.workspace = true
 uuid.workspace = true
 image.workspace = true
-cpal.workspace = true
+cpal = { workspace = true, optional = true }
 libc.workspace = true
+
+[features]
+# the default input device through cpal (macOS, iOS, desktop linux); a shell without it gives its own Platform::mic
+default = []
+cpal = ["dep:cpal"]

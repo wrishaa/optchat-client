@@ -14,6 +14,7 @@ pub mod tabs;
 pub mod tasks_view;
 pub mod testcmd;
 pub mod theme;
+pub mod tv;
 pub mod ui;
 pub mod workspace;
 pub mod workspaces;

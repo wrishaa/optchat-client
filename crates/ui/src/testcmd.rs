@@ -26,7 +26,7 @@ pub fn take() -> Vec<Value> {
 }
 
 pub fn is_input(c: &Value) -> bool {
-    matches!(c["op"].as_str(), Some("key" | "type"))
+    matches!(c["op"].as_str(), Some("key" | "type" | "keydown" | "keyup"))
 }
 pub fn is_mouse(c: &Value) -> bool {
     matches!(c["op"].as_str(), Some("click" | "scroll" | "drag" | "move" | "down" | "up"))
@@ -303,6 +303,13 @@ pub fn input(c: &Value, window: &mut Window, cx: &mut App) {
                 window.dispatch_keystroke(k, cx);
             }
         }
+        // a held key (the tv remote's mic): down, then up later
+        "keydown" | "keyup" => {
+            if let Some(k) = key_of(c["keys"].as_str().unwrap_or("")) {
+                let ev = if c["op"] == "keydown" { PlatformInput::KeyDown(KeyDownEvent { keystroke: k, is_held: false, prefer_character_input: false }) } else { PlatformInput::KeyUp(KeyUpEvent { keystroke: k }) };
+                window.dispatch_event(ev, cx);
+            }
+        }
         "type" => {
             for ch in c["text"].as_str().unwrap_or("").chars() {
                 let s = ch.to_string();
@@ -399,6 +406,8 @@ pub fn run(w: &mut Workspace, c: &Value, window: &mut Window, cx: &mut Context<W
             });
         }
         "close" => w.close_overlay(window, cx),
+        // draw a frame now (the tv's dev screenshot reads back the next frame)
+        "redraw" => window.refresh(),
         "quit" => cx.quit(),
         "resize" => window.resize(size(px(c["w"].as_f64().unwrap_or(400.) as f32), px(c["h"].as_f64().unwrap_or(860.) as f32))),
         "nudge" => {

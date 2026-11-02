@@ -137,7 +137,7 @@ pub struct Workspace {
     pub metrics_open: bool,
     pub narrow: bool,
     pub sheet: bool,
-    m_press: Option<std::time::Instant>,
+    pub(crate) m_press: Option<std::time::Instant>,
     _subs: Vec<Subscription>,
     _ticker: Option<Task<()>>,
     renders: u64,
@@ -723,7 +723,7 @@ impl Render for Workspace {
                 });
             }))
             .on_key_up(cx.listener(|w, e: &KeyUpEvent, _, cx| {
-                if e.keystroke.key == "m" {
+                if e.keystroke.key == "m" || crate::tv::enabled() && crate::tv::is_mic_key(&e.keystroke.key) {
                     if w.m_press.take().is_some() {
                         w.composer.update(cx, |c, cx| c.mic_up(cx));
                     }
@@ -746,6 +746,9 @@ impl Render for Workspace {
                     w.state.update(cx, |s, _| s.save_prefs());
                 }
             }));
+        if crate::tv::enabled() {
+            root = self.tv_actions(root, cx);
+        }
 
         if self.composer.read(cx).touch != narrow {
             self.composer.update(cx, |c, cx| {
