@@ -1,0 +1,16 @@
+[package]
+name = "optchat-tizen"
+edition.workspace = true
+version.workspace = true
+
+# samsung tizen tv shell (poc): a cdylib the c# host (shells/tizen/host) loads and calls oc_main() on.
+# milestone 1 = one gpui window, a colored rect and one line of text, nothing else.
+[lib]
+name = "ocgpui"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+gpui.workspace = true
+log.workspace = true
+gpui_platform = { workspace = true, features = ["wayland", "tizen"] }
