@@ -134,3 +134,58 @@ mod tests {
         assert_eq!(super::drop_last_word(""), "");
     }
 }
+
+// ---- temporary theme preview (to pick the tv's theme): every bundled theme in turn, 15 s each, its name on top.
+// the shell turns it on (tizen `theme-preview` feature); off = a normal build.
+static PREVIEW: AtomicBool = AtomicBool::new(false);
+pub const PREVIEW_SECS: u64 = 15;
+pub fn preview_on() -> bool {
+    PREVIEW.load(Ordering::Relaxed)
+}
+/// start cycling through `optchat_theme::builtin()` (the same list the settings picker shows), from the active one
+pub fn start_theme_preview(cx: &mut App) {
+    PREVIEW.store(true, Ordering::Relaxed);
+    cx.spawn(async move |cx: &mut AsyncApp| loop {
+        cx.background_executor().timer(std::time::Duration::from_secs(PREVIEW_SECS)).await;
+        let _ = cx.update(|cx| next_theme(cx));
+    })
+    .detach();
+}
+pub fn next_theme(cx: &mut App) {
+    let th = cx.global::<crate::theme::Themes>();
+    let i = th.all.iter().position(|t| t.id == th.active).map_or(0, |i| (i + 1) % th.all.len());
+    let id = th.all[i].id.clone();
+    crate::theme::set(cx, &id, false);
+}
+/// the active theme's name, centered at the top, above everything
+pub fn preview_label(cx: &App) -> Option<AnyElement> {
+    if !preview_on() {
+        return None;
+    }
+    let th = cx.global::<crate::theme::Themes>();
+    let i = th.all.iter().position(|t| t.id == th.active).unwrap_or(0);
+    let name = th.all.get(i).map_or(th.active.clone(), |t| t.name.clone());
+    let c = &th.c;
+    Some(
+        div()
+            .absolute()
+            .top(px(14.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .px(px(22.))
+                    .py(px(8.))
+                    .rounded(px(10.))
+                    .bg(c.panel2)
+                    .border_2()
+                    .border_color(c.accent)
+                    .text_color(c.text)
+                    .text_size(px(26.))
+                    .child(format!("{name}   {}/{}", i + 1, th.all.len())),
+            )
+            .into_any_element(),
+    )
+}

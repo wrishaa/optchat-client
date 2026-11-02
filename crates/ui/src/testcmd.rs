@@ -408,6 +408,8 @@ pub fn run(w: &mut Workspace, c: &Value, window: &mut Window, cx: &mut Context<W
         "close" => w.close_overlay(window, cx),
         // draw a frame now (the tv's dev screenshot reads back the next frame)
         "redraw" => window.refresh(),
+        // switch the theme (tv theme preview screenshots)
+        "theme" => crate::theme::set(cx, c["id"].as_str().unwrap_or("optchat-dark"), false),
         "quit" => cx.quit(),
         "resize" => window.resize(size(px(c["w"].as_f64().unwrap_or(400.) as f32), px(c["h"].as_f64().unwrap_or(860.) as f32))),
         "nudge" => {

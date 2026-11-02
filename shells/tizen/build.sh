@@ -3,17 +3,19 @@
 #   --dev-capture   dev build: screenshots, test channel, fake mic, logs via the mac dev server (never ship it)
 #   --seed FILE     dev build: FILE (json {engines:[{endpoint,name,ws,token}],active}) goes in as res/dev-seed.json;
 #                   it holds tokens: kept 0600, git-ignored, removed from the tree after packaging
+#   --theme-preview temporary: cycle all themes every 15 s with the name on top (to pick one)
 #   --no-install    stop after packaging
 set -e
 cd "$(dirname "$0")/../.."
 . shells/tizen/env.sh
 FEAT=""; SEED=""; prev=""
 for a in "$@"; do
-  [ "$a" = "--dev-capture" ] && FEAT="--features dev-capture"
+  [ "$a" = "--dev-capture" ] && FEAT="$FEAT dev-capture"
+  [ "$a" = "--theme-preview" ] && FEAT="$FEAT theme-preview"
   [ "$prev" = "--seed" ] && SEED="$a"
   prev="$a"
 done
-cargo build -p optchat-tizen --target armv7-unknown-linux-gnueabi --release $FEAT
+cargo build -p optchat-tizen --target armv7-unknown-linux-gnueabi --release ${FEAT:+--features "$FEAT"}
 $HOME/tizen-studio/tools/llvm-10/bin/llvm-strip -o shells/tizen/host/lib/libocgpui.so target/armv7-unknown-linux-gnueabi/release/libocgpui.so
 cd shells/tizen/host
 S=shared/res/dev-seed.json

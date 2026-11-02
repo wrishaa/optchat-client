@@ -29,3 +29,5 @@ default = []
 # dev-only: screenshots, the ui test channel, a recorded clip as the mic, log lines, all through the mac dev server
 # (optchat-scratch/tizen/scripts/devsrv.py). build with `build.sh --dev-capture`; never on in normal builds.
 dev-capture = ["gpui_wgpu/frame-capture", "dep:image"]
+# temporary: cycle every bundled theme (15 s each, name on top) to pick the tv's theme. `build.sh --theme-preview`
+theme-preview = []

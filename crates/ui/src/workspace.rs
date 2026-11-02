@@ -822,6 +822,7 @@ impl Workspace {
         }
         // the open popup / context menu (kit::menu), above everything
         root = root.children(crate::kit::menu::layer(cx));
+        root = root.children(crate::tv::preview_label(cx));
         root
     }
 }

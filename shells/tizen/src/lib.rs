@@ -30,6 +30,8 @@ impl log::Log for BeaconLog {
 }
 
 /// the ui scale on the tv (gpui_linux's tizen_scale)
+/// the default theme on the tv (until dj picks one from the preview)
+const TV_THEME: &str = "optchat-dark";
 const TV_SCALE: f32 = 1.5;
 
 static MIC: OnceLock<Arc<platform::RemoteMic>> = OnceLock::new();
@@ -140,7 +142,11 @@ pub extern "C" fn oc_main() -> i32 {
         ui::register_fonts(cx, assets::ASSETS);
         ui::set_executor(cx.background_executor().clone());
         let prefs: state::Prefs = std::fs::read_to_string(&prefs_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        theme::init(cx, prefs.theme.clone(), prefs.follow_system, cx.window_appearance());
+        // the tv's default theme: dark (a set pref wins); the system appearance isn't followed on the tv
+        theme::init(cx, Some(prefs.theme.clone().unwrap_or_else(|| TV_THEME.into())), false, cx.window_appearance());
+        if cfg!(feature = "theme-preview") {
+            tv::start_theme_preview(cx);
+        }
         kit::set_font_size(cx, px(prefs.font_size - 0.5));
         crate::ui::set_zoom(prefs.font_size);
         workspace::bind(cx);
