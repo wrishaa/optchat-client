@@ -67,5 +67,5 @@ doesn't open while the app is in front.
 
 - perf: ~3 fps at 1080p on the Mali-G31 / a72-32bit (frame ~300 ms: ~125 ms gpui layout+paint, ~165 ms gles draw); it
   also redraws while idle while a spinner is visible.
-- images in the feed: being fixed (texture format on the gles path).
+- sidebar on the tv shows only running/paused tasks, their ancestors and the open task (`crates/ui/src/tasks_view.rs`).
 - no on-screen keyboard: text comes from dictation only.
