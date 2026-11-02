@@ -31,8 +31,8 @@ impl log::Log for BeaconLog {
 
 /// the ui scale on the tv (gpui_linux's tizen_scale)
 /// the default theme on the tv (until dj picks one from the preview)
-const TV_THEME: &str = "optchat-dark";
-const TV_SCALE: f32 = 1.5;
+const TV_THEME: &str = "tomorrow-night";
+const TV_SCALE: f32 = 1.0;
 
 static MIC: OnceLock<Arc<platform::RemoteMic>> = OnceLock::new();
 
