@@ -43,33 +43,66 @@ impl TasksPanel {
     }
 }
 
+/// TV: only tasks that are running (a turn going, or status active) or paused show, plus their ancestors back to the
+/// root so the tree still reads, and the open task's path. None off the TV. Recomputed per render, so it stays live.
+fn tv_live(s: &AppState) -> Option<std::collections::HashSet<i64>> {
+    use optchat_proto::types::TaskStatus;
+    if !crate::tv::enabled() {
+        return None;
+    }
+    let mut keep = std::collections::HashSet::new();
+    let mut mark = |mut id: Option<i64>| {
+        while let Some(i) = id {
+            if !keep.insert(i) {
+                break;
+            }
+            id = s.tasks.get(&i).and_then(|x| x.task.parent);
+        }
+    };
+    for x in s.tasks.values() {
+        if x.running || matches!(x.task.status, TaskStatus::Active | TaskStatus::Paused) {
+            mark(Some(x.task.id));
+        }
+    }
+    mark(Some(s.current));
+    Some(keep)
+}
+
 /// the rows the Tasks view shows, top to bottom: (task, depth, on the path above the current task). Finished tasks are
 /// hidden unless "show ended" is on (always hidden on the TV), except the current one.
 pub fn visible_rows(s: &AppState, collapsed: &std::collections::HashSet<i64>) -> Vec<(TaskInfo, usize, bool)> {
     let mut rows: Vec<(TaskInfo, usize, bool)> = vec![];
     let show_ended = s.prefs.show_ended && !crate::tv::enabled();
     let cur = s.current;
-    fn walk(s: &AppState, id: i64, depth: usize, closed: &std::collections::HashSet<i64>, show_ended: bool, cur: i64, out: &mut Vec<(TaskInfo, usize, bool)>) {
+    let live = tv_live(s);
+    let live = &live;
+    fn walk(s: &AppState, id: i64, depth: usize, closed: &std::collections::HashSet<i64>, show_ended: bool, cur: i64, live: &Option<std::collections::HashSet<i64>>, out: &mut Vec<(TaskInfo, usize, bool)>) {
         let Some(x) = s.tasks.get(&id) else { return };
         out.push((x.clone(), depth, false));
         if closed.contains(&id) {
             return;
         }
         for c in s.children_of(id) {
+            if let Some(l) = live {
+                if l.contains(&c.task.id) {
+                    walk(s, c.task.id, depth + 1, closed, show_ended, cur, live, out);
+                }
+                continue;
+            }
             if show_ended || !c.task.status.terminal() || c.task.id == cur || s.ancestors(cur).iter().any(|a| a.task.id == c.task.id) {
-                walk(s, c.task.id, depth + 1, closed, show_ended, cur, out);
+                walk(s, c.task.id, depth + 1, closed, show_ended, cur, live, out);
             }
         }
     }
     if s.prefs.task_scope_all || crate::tv::enabled() {
-        walk(s, 0, 0, collapsed, show_ended, cur, &mut rows);
+        walk(s, 0, 0, collapsed, show_ended, cur, live, &mut rows);
     } else {
         let up = s.ancestors(cur);
         let n = up.len();
         for (d, x) in up.into_iter().enumerate() {
             rows.push((x.clone(), d, true));
         }
-        walk(s, cur, n, collapsed, show_ended, cur, &mut rows);
+        walk(s, cur, n, collapsed, show_ended, cur, live, &mut rows);
     }
     rows
 }
