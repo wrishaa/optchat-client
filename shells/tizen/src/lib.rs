@@ -11,6 +11,11 @@ use std::sync::{Arc, OnceLock};
 mod dev;
 mod platform;
 
+// mimalloc (default feature): the tv's glibc malloc/free was ~a quarter of the ui thread's busy time
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub fn beacon(m: &str) {
     dev::beacon(m)
 }
@@ -134,7 +139,19 @@ pub extern "C" fn oc_main() -> i32 {
     unsafe { std::env::set_var("WGPU_GLES_PRESENT_NON_NATIVE", "1") };
     // the whole ui at 1.5× (a 1280×720 layout on the 1080p panel): read from across a room, every view alike
     unsafe { std::env::set_var("GPUI_TIZEN_SCALE", TV_SCALE.to_string()) };
+    // buffer size as a fraction of the 1080p surface, upscaled by the compositor (wl_scaler); build-time knob for A/B
+    unsafe { std::env::set_var("GPUI_TIZEN_RENDER", option_env!("OC_TV_RENDER").unwrap_or("1")) };
+    // redraw only what changed since the last frame (vendor/zed gpui_wgpu damage.rs: the gles swapchain is one
+    // persistent renderbuffer); build-time knob for A/B, default on
+    unsafe { std::env::set_var("GPUI_DAMAGE", option_env!("OC_TV_DAMAGE").unwrap_or("1")) };
+    if cfg!(feature = "dev-capture") {
+        // dev screenshots: the presented pixels plus a full re-render of the same frame, to diff
+        unsafe { std::env::set_var("GPUI_DAMAGE_CHECK", "1") };
+    }
     let data = data_dir();
+    // linked gl program binaries kept across starts (vendor/wgpu-hal gles): the Mali compile + link of gpui's
+    // pipelines is ~2.4 s of a cold start, a cached binary loads in a few ms
+    unsafe { std::env::set_var("WGPU_GLES_PROGRAM_CACHE_DIR", format!("{data}/gl-programs")) };
     beacon(&format!("oc_main start data={data}"));
     dev::init(&data);
     let mic = MIC.get_or_init(|| Arc::new(platform::RemoteMic::default())).clone();

@@ -223,7 +223,7 @@ impl super::Device {
         stage: &crate::ProgrammableStage<super::ShaderModule>,
         context: CompilationContext,
         program: glow::Program,
-    ) -> Result<glow::Shader, crate::PipelineError> {
+    ) -> Result<String, crate::PipelineError> {
         use naga::back::glsl;
         let pipeline_options = glsl::PipelineOptions {
             shader_stage: naga_stage,
@@ -309,7 +309,26 @@ impl super::Device {
             program,
         );
 
-        unsafe { Self::compile_shader(gl, &output, naga_stage, stage.module.label.as_deref()) }
+        Ok(output)
+    }
+
+    /// optchat tizen: where a linked program's binary is kept between runs (`WGPU_GLES_PROGRAM_CACHE_DIR`), keyed by
+    /// the driver and the exact glsl. Compiling + linking gpui's 9 programs costs the tv's Mali ~2.4 s per start.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn program_cache_path(gl: &glow::Context, sources: &[(naga::ShaderStage, String)]) -> Option<std::path::PathBuf> {
+        use std::hash::{Hash, Hasher};
+        let dir = std::env::var_os("WGPU_GLES_PROGRAM_CACHE_DIR")?;
+        if unsafe { gl.get_parameter_i32(glow::NUM_PROGRAM_BINARY_FORMATS) } <= 0 {
+            return None;
+        }
+        let mut h = std::hash::DefaultHasher::new();
+        unsafe { gl.get_parameter_string(glow::RENDERER) }.hash(&mut h);
+        unsafe { gl.get_parameter_string(glow::VERSION) }.hash(&mut h);
+        for (stage, src) in sources {
+            (*stage as u32).hash(&mut h);
+            src.hash(&mut h);
+        }
+        Some(std::path::Path::new(&dir).join(format!("{:016x}.bin", h.finish())))
     }
 
     unsafe fn create_pipeline<'a>(
@@ -401,7 +420,7 @@ impl super::Device {
         let mut immediates_items = ArrayVec::<_, { crate::MAX_CONCURRENT_SHADER_STAGES }>::new();
         let mut sampler_map = [None; super::MAX_TEXTURE_SLOTS];
         let mut has_stages = wgt::ShaderStages::empty();
-        let mut shaders_to_delete = ArrayVec::<_, { crate::MAX_CONCURRENT_SHADER_STAGES }>::new();
+        let mut sources = ArrayVec::<(naga::ShaderStage, String), { crate::MAX_CONCURRENT_SHADER_STAGES }>::new();
         let mut clip_distance_count = 0;
 
         for &(naga_stage, stage) in &shaders {
@@ -419,41 +438,83 @@ impl super::Device {
                 clip_distance_count: &mut clip_distance_count,
             };
 
-            let shader = Self::create_shader(gl, naga_stage, stage, context, program)?;
-            shaders_to_delete.push(shader);
+            let src = Self::create_shader(gl, naga_stage, stage, context, program)?;
+            sources.push((naga_stage, src));
         }
+        let label_of = |i: usize| shaders.get(i).and_then(|s| s.1.module.label.clone());
 
         // Create empty fragment shader if only vertex shader is present
         if has_stages == wgt::ShaderStages::VERTEX {
             let shader_src = format!("#version {glsl_version}\n void main(void) {{}}",);
             log::debug!("Only vertex shader is present. Creating an empty fragment shader",);
-            let shader = unsafe {
-                Self::compile_shader(
-                    gl,
-                    &shader_src,
-                    naga::ShaderStage::Fragment,
-                    Some("(wgpu internal) dummy fragment shader"),
-                )
-            }?;
-            shaders_to_delete.push(shader);
+            sources.push((naga::ShaderStage::Fragment, shader_src));
         }
 
-        for &shader in shaders_to_delete.iter() {
-            unsafe { gl.attach_shader(program, shader) };
+        #[cfg(not(target_arch = "wasm32"))]
+        let cache_path = Self::program_cache_path(gl, &sources);
+        #[cfg(target_arch = "wasm32")]
+        let cache_path: Option<std::path::PathBuf> = None;
+        let mut from_cache = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(bytes) = cache_path.as_ref().and_then(|p| std::fs::read(p).ok()).filter(|b| b.len() > 4) {
+            let format = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            unsafe { gl.program_binary(program, &glow::ProgramBinary { buffer: bytes[4..].to_vec(), format }) };
+            from_cache = unsafe { gl.get_program_link_status(program) };
+            if !from_cache {
+                // a driver update or a stale file: drop it, compile below
+                let _ = std::fs::remove_file(cache_path.as_ref().unwrap());
+            }
         }
-        unsafe { gl.link_program(program) };
 
-        for shader in shaders_to_delete {
-            unsafe { gl.delete_shader(shader) };
+        if !from_cache {
+            let mut shaders_to_delete = ArrayVec::<_, { crate::MAX_CONCURRENT_SHADER_STAGES }>::new();
+            for (i, (naga_stage, src)) in sources.iter().enumerate() {
+                let label = if i < shaders.len() { label_of(i) } else { Some("(wgpu internal) dummy fragment shader".into()) };
+                match unsafe { Self::compile_shader(gl, src, *naga_stage, label.as_deref()) } {
+                    Ok(shader) => shaders_to_delete.push(shader),
+                    Err(e) => {
+                        for shader in shaders_to_delete {
+                            unsafe { gl.delete_shader(shader) };
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+
+            for &shader in shaders_to_delete.iter() {
+                unsafe { gl.attach_shader(program, shader) };
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if cache_path.is_some() {
+                unsafe { gl.program_binary_retrievable_hint(program, true) };
+            }
+            unsafe { gl.link_program(program) };
+
+            for shader in shaders_to_delete {
+                unsafe { gl.delete_shader(shader) };
+            }
+
+            log::debug!("\tLinked program {program:?}");
+
+            let linked_ok = unsafe { gl.get_program_link_status(program) };
+            let msg = unsafe { gl.get_program_info_log(program) };
+            if !linked_ok {
+                return Err(crate::PipelineError::Linkage(has_stages, msg));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let (Some(path), Some(bin)) = (cache_path.as_ref(), unsafe { gl.get_program_binary(program) }) {
+                let mut out = bin.format.to_le_bytes().to_vec();
+                out.extend_from_slice(&bin.buffer);
+                let tmp = path.with_extension("tmp");
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if std::fs::write(&tmp, &out).is_ok() {
+                    let _ = std::fs::rename(&tmp, path);
+                }
+            }
         }
-
-        log::debug!("\tLinked program {program:?}");
-
-        let linked_ok = unsafe { gl.get_program_link_status(program) };
         let msg = unsafe { gl.get_program_info_log(program) };
-        if !linked_ok {
-            return Err(crate::PipelineError::Linkage(has_stages, msg));
-        }
         if !msg.is_empty() {
             log::debug!("\tLink message: {msg}");
         }

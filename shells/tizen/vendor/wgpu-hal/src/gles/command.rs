@@ -651,6 +651,12 @@ impl crate::CommandEncoder for super::CommandEncoder {
             .enumerate()
         {
             if cat.ops.contains(crate::AttachmentOps::LOAD_CLEAR) {
+                if super::oc_damage::KEEP.load(core::sync::atomic::Ordering::SeqCst)
+                    && matches!(cat.target.view.inner, super::TextureInner::Renderbuffer { raw }
+                        if raw.0.get() == super::oc_damage::SURFACE_RB.load(core::sync::atomic::Ordering::SeqCst))
+                {
+                    continue;
+                }
                 let c = &cat.clear_value;
                 self.cmd_buffer.commands.push(
                     match cat.target.view.format.sample_type(None, None).unwrap() {

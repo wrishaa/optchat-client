@@ -62,7 +62,7 @@ pub fn tab_strip(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Works
                 .when(on, |d| d.bg(k.bg).child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(k.accent)))
                 .when(!on, |d| d.bg(k.bg2).hover(move |s| s.bg(hover)))
                 .when(!menu_open, |d| d.tooltip(tooltip(tip)))
-                .child(probe(format!("tab.{id}")))
+                .children(probe(format!("tab.{id}")))
                 .child(lead)
                 .child(div().flex_1().min_w_0().overflow_hidden().line_clamp(1).text_ellipsis().child(title))
                 .when(x.as_ref().map(|x| x.running).unwrap_or(false), |d| d.child(spinner(SharedString::from(format!("tabspin{id}")), 12., k.accent)))
@@ -100,20 +100,20 @@ pub fn tab_strip(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Works
     if let Some(st) = st {
         let term = st.terminal();
         if !term && st != TaskStatus::Paused && st != TaskStatus::Pending {
-            actions = actions.child(icon_btn("act-pause", "pause", 15., cx).tooltip(tooltip("Pause this task (and its subtree)")).child(probe("act.pause")).on_click(cx.listener(|w, _, window, cx| w.start_ask("pause", window, cx))));
+            actions = actions.child(icon_btn("act-pause", "pause", 15., cx).tooltip(tooltip("Pause this task (and its subtree)")).children(probe("act.pause")).on_click(cx.listener(|w, _, window, cx| w.start_ask("pause", window, cx))));
         }
         if st == TaskStatus::Paused {
-            actions = actions.child(icon_btn("act-resume", "play", 15., cx).tooltip(tooltip("Resume")).child(probe("act.resume")).on_click(cx.listener(|w, _, window, cx| w.start_ask("resume", window, cx))));
+            actions = actions.child(icon_btn("act-resume", "play", 15., cx).tooltip(tooltip("Resume")).children(probe("act.resume")).on_click(cx.listener(|w, _, window, cx| w.start_ask("resume", window, cx))));
         }
         if !root && !term {
-            actions = actions.child(icon_btn("act-close", "circle-check", 15., cx).tooltip(tooltip("Close as done, with a result")).child(probe("act.close")).on_click(cx.listener(|w, _, window, cx| w.start_ask("close", window, cx))));
-            actions = actions.child(icon_btn_c("act-cancel", "ban", 15., k.red, cx).tooltip(tooltip("Cancel this task (and its subtree)")).child(probe("act.cancel")).on_click(cx.listener(|w, _, window, cx| w.start_ask("cancel", window, cx))));
+            actions = actions.child(icon_btn("act-close", "circle-check", 15., cx).tooltip(tooltip("Close as done, with a result")).children(probe("act.close")).on_click(cx.listener(|w, _, window, cx| w.start_ask("close", window, cx))));
+            actions = actions.child(icon_btn_c("act-cancel", "ban", 15., k.red, cx).tooltip(tooltip("Cancel this task (and its subtree)")).children(probe("act.cancel")).on_click(cx.listener(|w, _, window, cx| w.start_ask("cancel", window, cx))));
         }
         if !term {
-            actions = actions.child(icon_btn_c("act-new", "git-branch-plus", 15., k.accent, cx).tooltip(tooltip("New task under this one (⌘N)")).child(probe("act.new")).on_click(cx.listener(|w, _, window, cx| dialogs::open_new_task(w, None, window, cx))));
+            actions = actions.child(icon_btn_c("act-new", "git-branch-plus", 15., k.accent, cx).tooltip(tooltip("New task under this one (⌘N)")).children(probe("act.new")).on_click(cx.listener(|w, _, window, cx| dialogs::open_new_task(w, None, window, cx))));
         }
     }
-    div().flex().flex_none().h(px(36.)).bg(k.bg2).border_b_1().border_color(k.line).child(strip).child(actions).child(probe("tabbar"))
+    div().flex().flex_none().h(px(36.)).bg(k.bg2).border_b_1().border_color(k.line).child(strip).child(actions).children(probe("tabbar"))
 }
 
 pub fn task_bar(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement {
@@ -129,9 +129,9 @@ pub fn task_bar(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Worksp
         return base
             .bg(k.panel)
             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(k.text).whitespace_nowrap().child(format!("{}{}", a.label, if t.id == 0 { String::new() } else { format!(" #{}", t.id) })))
-            .child(div().flex_1().min_w_0().child(Input::new(&w.ask_input).small()).child(probe("ask.input")))
+            .child(div().flex_1().min_w_0().child(Input::new(&w.ask_input).small()).children(probe("ask.input")))
             .when((a.op == "pause" || a.op == "cancel" || a.op == "close") && kids_live, |d| d.child(div().text_color(k.muted).text_size(px(11.5)).whitespace_nowrap().child("and its subtree")))
-            .child(disabled(btn_small("ask-go", a.label, if a.op == "cancel" { Tone::Danger } else { Tone::Primary }, cx), off).child(probe("ask.go")).when(!off, |d| d.on_click(cx.listener(|w, _, window, cx| w.confirm_ask(window, cx)))))
+            .child(disabled(btn_small("ask-go", a.label, if a.op == "cancel" { Tone::Danger } else { Tone::Primary }, cx), off).children(probe("ask.go")).when(!off, |d| d.on_click(cx.listener(|w, _, window, cx| w.confirm_ask(window, cx)))))
             .child(btn_small("ask-esc", "Esc", Tone::Ghost, cx).on_click(cx.listener(|w, _, _, cx| {
                 w.ask = None;
                 cx.notify();
@@ -150,19 +150,19 @@ pub fn task_bar(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Worksp
     crumbs = crumbs.child(div().flex_1().min_w_0().text_color(k.text).overflow_hidden().line_clamp(1).text_ellipsis().child(if t.id == 0 { "main chat".to_string() } else { format!("#{} {}", t.id, t.title) }));
     if t.mode == TaskMode::Continue {
         if let Some(p) = t.prev {
-            crumbs = crumbs.child(div().flex().gap(px(4.)).text_color(k.muted).text_size(px(11.5)).child("· continues").child(div().id("prevlink").text_color(k.accent).cursor_pointer().child(format!("#{p}")).child(probe("taskbar.prev")).on_click(cx.listener(move |w, _, window, cx| w.open_task(p, window, cx)))));
+            crumbs = crumbs.child(div().flex().gap(px(4.)).text_color(k.muted).text_size(px(11.5)).child("· continues").child(div().id("prevlink").text_color(k.accent).cursor_pointer().child(format!("#{p}")).children(probe("taskbar.prev")).on_click(cx.listener(move |w, _, window, cx| w.open_task(p, window, cx)))));
         }
     }
     let mut bar = base.child(crumbs);
     if let Some(r) = &t.result {
-        bar = bar.child(div().max_w(relative(0.5)).overflow_hidden().line_clamp(1).text_ellipsis().text_color(k.green).child(format!("→ {r}")).child(probe("taskbar.why")));
+        bar = bar.child(div().max_w(relative(0.5)).overflow_hidden().line_clamp(1).text_ellipsis().text_color(k.green).child(format!("→ {r}")).children(probe("taskbar.why")));
     } else if let Some(r) = &t.reason {
         let col = match t.status {
             TaskStatus::Paused => k.amber,
             TaskStatus::Canceled => k.red,
             _ => k.muted,
         };
-        bar = bar.child(div().max_w(relative(0.5)).overflow_hidden().line_clamp(1).text_ellipsis().text_color(col).child(format!("{}: {r}", t.status.as_str())).child(probe("taskbar.why")));
+        bar = bar.child(div().max_w(relative(0.5)).overflow_hidden().line_clamp(1).text_ellipsis().text_color(col).child(format!("{}: {r}", t.status.as_str())).children(probe("taskbar.why")));
     }
     bar.into_any_element()
 }
@@ -196,6 +196,6 @@ pub fn endbar(w: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElemen
             .text_color(k.text2)
             .child(status_dot("end", t.status.as_str(), 9., cx))
             .child(div().flex_1().child(format!("This task is {}{tail}. Its memory stays readable.", t.status.as_str())))
-            .child(btn("continue-new", "Continue as a new task", Tone::Primary, cx).child(probe("endbar.continue")).on_click(cx.listener(move |w, _, window, cx| dialogs::open_new_task(w, Some(("continue".into(), Some(id), parent)), window, cx)))),
+            .child(btn("continue-new", "Continue as a new task", Tone::Primary, cx).children(probe("endbar.continue")).on_click(cx.listener(move |w, _, window, cx| dialogs::open_new_task(w, Some(("continue".into(), Some(id), parent)), window, cx)))),
     )
 }

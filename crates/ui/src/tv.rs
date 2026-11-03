@@ -20,7 +20,12 @@ pub fn enabled() -> bool {
 }
 pub fn enable() {
     TV.store(true, Ordering::Relaxed);
+    // engine traffic (tickers, streaming text of running tasks) redraws at most ~3×/s on the tv
+    optchat_client::state::set_engine_redraw_gap(ENGINE_REDRAW_GAP_MS);
 }
+
+/// see `enable`; dev builds can override it (`OC_ENGINE_REDRAW_GAP_MS`) for A/B
+pub const ENGINE_REDRAW_GAP_MS: u64 = 300;
 
 /// the remote's keys, in the workspace (they win over the desktop bindings: bound after them)
 pub fn bind(cx: &mut App) {
@@ -94,10 +99,11 @@ impl Workspace {
     }
     /// the remote's actions, on the workspace's root element
     pub fn tv_actions<E: InteractiveElement>(&mut self, d: E, cx: &mut Context<Self>) -> E {
-        d.on_action(cx.listener(|w, _: &Up, window, cx| w.tv_step(-1, window, cx)))
-            .on_action(cx.listener(|w, _: &Down, window, cx| w.tv_step(1, window, cx)))
-            .on_action(cx.listener(|w, _: &Left, _, cx| w.tv_scroll(-360., cx)))
-            .on_action(cx.listener(|w, _: &Right, _, cx| w.tv_scroll(360., cx)))
+        use crate::ui::anim::input;
+        d.on_action(cx.listener(|w, _: &Up, window, cx| { input(); w.tv_step(-1, window, cx) }))
+            .on_action(cx.listener(|w, _: &Down, window, cx| { input(); w.tv_step(1, window, cx) }))
+            .on_action(cx.listener(|w, _: &Left, _, cx| { input(); w.tv_scroll(-360., cx) }))
+            .on_action(cx.listener(|w, _: &Right, _, cx| { input(); w.tv_scroll(360., cx) }))
             .on_action(cx.listener(|w, _: &Confirm, window, cx| w.tv_send(window, cx)))
             .on_action(cx.listener(|w, _: &Green, window, cx| w.tv_send(window, cx)))
             .on_action(cx.listener(|w, _: &Red, window, cx| {

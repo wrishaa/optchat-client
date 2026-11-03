@@ -98,6 +98,22 @@ mod queue;
 
 pub use fence::Fence;
 
+/// optchat (tizen tv, dev only): read back the swapchain renderbuffer, i.e. exactly the pixels presented
+/// (damage-limited frames included), on the next present. RGBA8, top row first.
+/// optchat (tizen tv): damage-limited frames keep the swapchain renderbuffer's old pixels. wgpu-core treats
+/// every acquired surface texture as uninitialized and clears it before a LoadOp::Load pass; while KEEP is
+/// set, clears of the swapchain renderbuffer (SURFACE_RB) are dropped. The caller sets KEEP only around the
+/// encode + submit of a frame that redraws a damage rect (gpui_wgpu damage.rs).
+pub mod oc_damage {
+    pub static KEEP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    pub static SURFACE_RB: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+}
+
+pub mod oc_readback {
+    pub static WANT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    pub static SINK: std::sync::OnceLock<fn(u32, u32, alloc::vec::Vec<u8>)> = std::sync::OnceLock::new();
+}
+
 #[cfg(not(any(windows, webgl)))]
 pub use self::egl::{AdapterContext, AdapterContextLock};
 #[cfg(not(any(windows, webgl)))]

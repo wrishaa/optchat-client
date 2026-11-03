@@ -434,6 +434,7 @@ fn regex_lite(_: &str) -> impl Fn(&str) -> bool {
 
 impl Render for Feed {
     fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _t = crate::ui::rtime::guard("feed");
         crate::ui::anim::area(crate::ui::anim::FEED);
         // row probes are re-recorded by the rows rendered in this frame: drop the ones scrolled out of range
         if crate::ui::probes_on() {
@@ -489,7 +490,7 @@ impl Render for Feed {
                             .cursor_pointer()
                             .hover(move |s| s.bg(k2.hover))
                             .child(icon("arrow-down", 16., k.text2))
-                            .child(probe("feed.jump"))
+                            .children(probe("feed.jump"))
                             .on_click(cx.listener(|f, _, _, cx| f.jump_to_bottom(cx))),
                     ),
                 )
@@ -505,6 +506,7 @@ impl Feed {
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let _t = crate::ui::rtime::guard("feedRow");
         let Some(row) = self.rows.get(ix).cloned() else { return div().into_any_element() };
         crate::markdown::set_compact(self.compact);
         let first = ix == 0;
@@ -531,7 +533,7 @@ impl Feed {
             d = d.pt(zx(26.));
         }
         if last {
-            d = d.pb(zx(30.)).child(probe("feed.last"));
+            d = d.pb(zx(30.)).children(probe("feed.last"));
         }
         d.into_any_element()
     }
@@ -571,7 +573,7 @@ impl Feed {
                     crate::ui::set_state_extra("feedEmptyText", serde_json::json!(msg));
                     msg
                 })
-                .child(probe("feed.empty"))
+                .children(probe("feed.empty"))
                 .into_any_element(),
             _ => div()
                 .mt(zx(110.))
@@ -587,7 +589,7 @@ impl Feed {
                 .child(div().text_size(zx(26.)).text_color(k.text).font_weight(FontWeight::SEMIBOLD).child("One chat. It never ends."))
                 .child("Every message is kept forever and folded into a tree of summaries. Each turn starts fresh with a ~128 KB view of the whole history, and the agent zooms in when it needs detail. Work can branch into tasks: each one a chat of its own.")
                 .child(div().text_size(zx(12.)).child("Running on your local Claude Code and Codex logins."))
-                .child(probe("feed.empty"))
+                .children(probe("feed.empty"))
                 .into_any_element(),
         }
     }
@@ -621,7 +623,7 @@ impl Feed {
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .child(format!("Load earlier messages ({n} more)"))
-                    .child(probe("feed.more"))
+                    .children(probe("feed.more"))
                     .on_click(cx.listener(|f, _, _, cx| f.load_earlier(cx))),
             )
             .into_any_element()
@@ -764,7 +766,7 @@ impl Feed {
         Some(
             btn_small(ElementId::Name(format!("cut{i}").into()), format!("shortened · show all {} chars", group_thousands(n)), Tone::Ghost, cx)
                 .mt(zx(4.))
-                .child(probe(format!("cut.{i}")))
+                .children(probe(format!("cut.{i}")))
                 .on_click(cx.listener(move |f, _, _, cx| {
                     let slim = f.state.read(cx).cur.log.iter().any(|x| x.i == i && x.cut.is_some());
                     if slim {
@@ -854,7 +856,7 @@ impl Feed {
             .overflow_hidden()
             .cursor_pointer()
             .child(img_el)
-            .child(probe(format!("img.{}", &blob[..12.min(blob.len())])))
+            .children(probe(format!("img.{}", &blob[..12.min(blob.len())])))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(FeedEvent::Lightbox(blob.clone()))))
             .into_any_element()
     }
@@ -1009,7 +1011,7 @@ impl Feed {
                     .px(zx(12.))
                     .pt(zx(8.))
                     .pb(zx(10.))
-                    .when(long, |d| d.cursor_pointer().child(probe(format!("rep.{}", e.i))).on_click(cx.listener(move |f, _, _, cx| f.toggle(&format!("r{}", e_i(&key)), cx))))
+                    .when(long, |d| d.cursor_pointer().children(probe(format!("rep.{}", e.i))).on_click(cx.listener(move |f, _, _, cx| f.toggle(&format!("r{}", e_i(&key)), cx))))
                     .child(body_el),
             )
             .into_any_element()
@@ -1049,7 +1051,7 @@ impl Feed {
                                 .font_family(crate::ui::MONO)
                                 .text_color(k.violet)
                                 .cursor_pointer()
-                                .child(probe(format!("work.{}.{n}", e.i)))
+                                .children(probe(format!("work.{}.{n}", e.i)))
                                 .child(match tid {
                                     Some(t) => format!("{id} → #{t}"),
                                     None => id.clone(),
@@ -1128,7 +1130,7 @@ impl Feed {
             .child(
                 div()
                     .id(ElementId::Name(format!("th{}", e.i).into()))
-                    .child(probe(format!("tool.{}", e.i)))
+                    .children(probe(format!("tool.{}", e.i)))
                     .flex()
                     .items_center()
                     .gap(zx(9.))
@@ -1227,7 +1229,7 @@ impl Feed {
                 }
             }
             if any {
-                detail = detail.child(ims.child(probe(format!("toolimg.{}", e.i))));
+                detail = detail.child(ims.children(probe(format!("toolimg.{}", e.i))));
             }
             card = card.child(detail);
         }
@@ -1368,7 +1370,7 @@ impl Feed {
         }
         let mut d = div().flex().flex_col().mt(zx(6.)).mb(zx(14.));
         if let Some(err) = &turn.error {
-            d = d.child(div().text_size(zx(13.)).text_color(k.red).my(zx(6.)).child(format!("⚠ {err}")).child(probe(format!("foot.err.{turn_id}"))));
+            d = d.child(div().text_size(zx(13.)).text_color(k.red).my(zx(6.)).child(format!("⚠ {err}")).children(probe(format!("foot.err.{turn_id}"))));
         }
         d = d.child(
             div()
@@ -1381,7 +1383,7 @@ impl Feed {
                 .cursor_pointer()
                 .child(line)
                 .child(chevron(format!("fcc{turn_id}"), 11., k.faint, open))
-                .child(probe(format!("foot.line.{turn_id}")))
+                .children(probe(format!("foot.line.{turn_id}")))
                 .on_click(cx.listener({
                     let key = key.clone();
                     move |f, _, _, cx| f.toggle(&key, cx)
@@ -1453,7 +1455,7 @@ impl Feed {
                         }),
                 )
             })
-            .child(probe(format!("tool.{}", e.i)))
+            .children(probe(format!("tool.{}", e.i)))
             .on_click(cx.listener(move |f, _, _, cx| f.toggle(&key, cx)))
             .into_any_element()
     }
@@ -1486,11 +1488,11 @@ impl Feed {
         );
         let u = &turn.usage;
         let mut row = div().flex().flex_wrap().items_center().gap(zx(6.)).mt(zx(10.)).text_size(zx(11.5));
-        row = row.child(chip(label, if turn.backend == Backend::ClaudeCode { ChipTone::Acc } else { ChipTone::Green }, cx).child(probe(format!("foot.model.{}", turn.id))));
+        row = row.child(chip(label, if turn.backend == Backend::ClaudeCode { ChipTone::Acc } else { ChipTone::Green }, cx).children(probe(format!("foot.model.{}", turn.id))));
         row = row.child(
             chip(format!("{} step{} {}", reqs.len(), if reqs.len() == 1 { "" } else { "s" }, if open { "▴" } else { "▾" }), ChipTone::Plain, cx)
                 .id(ElementId::Name(format!("steps{turn_id}").into()))
-                .child(probe(format!("foot.steps.{turn_id}")))
+                .children(probe(format!("foot.steps.{turn_id}")))
                 .cursor_pointer()
                 .on_click(cx.listener({
                     let key = key.clone();
@@ -1511,11 +1513,11 @@ impl Feed {
         }
         if let Some(l) = &last {
             let rid = l.id.clone();
-            row = row.child(chip("context ↗", ChipTone::Plain, cx).id(ElementId::Name(format!("ctx{turn_id}").into())).child(probe(format!("foot.ctx.{turn_id}"))).cursor_pointer().on_click(cx.listener(move |_, _, _, cx| cx.emit(FeedEvent::SelectRequest(rid.clone())))));
+            row = row.child(chip("context ↗", ChipTone::Plain, cx).id(ElementId::Name(format!("ctx{turn_id}").into())).children(probe(format!("foot.ctx.{turn_id}"))).cursor_pointer().on_click(cx.listener(move |_, _, _, cx| cx.emit(FeedEvent::SelectRequest(rid.clone())))));
         }
         let mut d = div().flex().flex_col().mb(zx(18.));
         if let Some(err) = &turn.error {
-            d = d.child(div().text_size(zx(13.)).text_color(k.red).my(zx(6.)).child(format!("⚠ {err}")).child(probe(format!("foot.err.{turn_id}"))));
+            d = d.child(div().text_size(zx(13.)).text_color(k.red).my(zx(6.)).child(format!("⚠ {err}")).children(probe(format!("foot.err.{turn_id}"))));
         }
         d = d.child(row);
         if open {

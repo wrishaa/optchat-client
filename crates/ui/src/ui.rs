@@ -15,6 +15,41 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
 // A 60 fps animation redraws the whole window every frame (the platform draw dominates, ~25% CPU while a
 // "summarizing" spinner shows). These are driven by the clock instead and redrawn by a 20 Hz ticker
 // (Workspace::start_ticker) that notifies only the views that drew one in their last render.
+/// dev perf: wall time of view render() calls (element building only, not layout/paint), read by the tizen
+/// dev build's perf sample. Cheap (a thread-local push) and only summarised when taken.
+pub mod rtime {
+    static T: std::sync::Mutex<Vec<(&'static str, Vec<f32>)>> = std::sync::Mutex::new(Vec::new());
+    /// off unless a dev perf build turns it on (tizen `--perf`): then guards record
+    pub static ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub struct Guard(&'static str, Option<std::time::Instant>);
+    pub fn guard(name: &'static str) -> Guard {
+        Guard(name, ON.load(std::sync::atomic::Ordering::Relaxed).then(std::time::Instant::now))
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let Some(t0) = self.1 else { return };
+            let d = t0.elapsed().as_secs_f32() * 1000.0;
+            let mut t = T.lock().unwrap();
+            match t.iter_mut().find(|x| x.0 == self.0) {
+                Some(x) => x.1.push(d),
+                None => t.push((self.0, vec![d])),
+            }
+        }
+    }
+    /// {name: {n, p50, max}} since the last take
+    pub fn take() -> serde_json::Value {
+        {
+            let mut m = serde_json::Map::new();
+            for (n, mut v) in T.lock().unwrap().drain(..) {
+                v.sort_by(|a, b| a.total_cmp(b));
+                let p50 = v[v.len() / 2];
+                m.insert(n.to_string(), serde_json::json!({ "n": v.len(), "p50": p50, "max": v[v.len() - 1] }));
+            }
+            serde_json::Value::Object(m)
+        }
+    }
+}
+
 pub mod anim {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -34,12 +69,28 @@ pub mod anim {
     pub fn take() -> u32 {
         WANTED.swap(0, Ordering::Relaxed)
     }
+    /// dev A/B (tizen perf bit 16384): ambient animations stand still and ask for no frames, as with none on screen
+    pub static FREEZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub(crate) fn frozen() -> bool {
+        FREEZE.load(Ordering::Relaxed)
+    }
     static ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
     pub fn set_window_active(v: bool) {
         ACTIVE.store(v, Ordering::Relaxed);
     }
     pub fn window_active() -> bool {
         ACTIVE.load(Ordering::Relaxed)
+    }
+    /// the last remote / key input, ms on `clock()`: the tv's ambient ticks wait while input is being answered
+    static INPUT_MS: AtomicU32 = AtomicU32::new(0);
+    /// dev A/B (tizen perf bit 524288): no hold after input
+    pub static NO_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub fn input() {
+        INPUT_MS.store((clock() * 1000.0) as u32 + 1, Ordering::Relaxed);
+    }
+    pub fn input_within(ms: u32) -> bool {
+        let t = INPUT_MS.load(Ordering::Relaxed);
+        !NO_HOLD.load(Ordering::Relaxed) && t != 0 && ((clock() * 1000.0) as u32).saturating_sub(t) < ms
     }
     pub fn clock() -> f32 {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -48,14 +99,22 @@ pub mod anim {
 }
 
 pub fn spinner(_id: impl Into<ElementId>, size: f32, color: Hsla) -> impl IntoElement {
+    if anim::frozen() {
+        return icon("loader-circle", size, color).with_transformation(Transformation::rotate(percentage(0.0)));
+    }
+    // asks the ticker for frames only while one is on screen (anim::want); idle stays idle
     anim::want();
-    // 12 steps of 30° per second, in step with the 12.5 Hz ticker
-    let turn = ((anim::clock() * 12.0).floor() / 12.0).fract();
+    // 12 steps of 30° per second, in step with the 12.5 Hz ticker (tv: 8 of 45°, its ticker is 8 Hz)
+    let steps = if crate::tv::enabled() { 8.0 } else { 12.0 };
+    let turn = ((anim::clock() * steps).floor() / steps).fract();
     icon("loader-circle", size, color).with_transformation(Transformation::rotate(percentage(turn)))
 }
 
 /// A soft pulse (opacity) for "live" dots.
 pub fn pulse<E: IntoElement + Styled + 'static>(_id: impl Into<ElementId>, el: E) -> impl IntoElement {
+    if anim::frozen() {
+        return el.opacity(1.0);
+    }
     anim::want();
     let d = (anim::clock() / 1.2 * std::f32::consts::TAU).cos() * 0.5 + 0.5;
     el.opacity(0.35 + 0.65 * d)
@@ -306,13 +365,21 @@ pub fn colors(cx: &App) -> C {
 
 // ---- probes: element bounds for UI tests (OPTCHAT_PROBES=<file>), written as JSON by a background thread ----
 pub static PROBES: OnceLock<Mutex<HashMap<String, [f32; 4]>>> = OnceLock::new();
+/// dev perf A/B (tizen perf bit 131072): probes off at runtime, as in a release build
+pub static PROBES_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub fn probes_on() -> bool {
-    std::env::var("OPTCHAT_PROBES").is_ok()
+    // read once: the env is set before the ui starts (tests, the tizen dev build)
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("OPTCHAT_PROBES").is_ok()) && !PROBES_OFF.load(std::sync::atomic::Ordering::Relaxed)
 }
-/// An invisible absolute child that records its parent's bounds under `name`.
-pub fn probe(name: impl Into<String>) -> impl IntoElement {
+/// An invisible absolute child that records its parent's bounds under `name`; nothing at all (no element, no
+/// layout node) without probes. Use as `.children(probe(..))`.
+pub fn probe(name: impl Into<String>) -> Option<impl IntoElement> {
+    if !probes_on() {
+        return None;
+    }
     let name = name.into();
-    canvas(
+    Some(canvas(
         move |b, _w, _cx| {
             if probes_on() {
                 PROBES.get_or_init(|| Mutex::new(HashMap::new())).lock().insert(name, [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]);
@@ -323,7 +390,7 @@ pub fn probe(name: impl Into<String>) -> impl IntoElement {
     .absolute()
     .size_full()
     .top_0()
-    .left_0()
+    .left_0())
 }
 /// A JSON summary of the app state for UI tests (written next to the probes as `<file>.state.json`).
 pub static STATE_JSON: OnceLock<Mutex<String>> = OnceLock::new();

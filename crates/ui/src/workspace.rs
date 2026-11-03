@@ -355,8 +355,13 @@ impl Workspace {
             .detach();
         }
         self._ticker = Some(cx.spawn(async move |this, cx| loop {
-            let ms = if anim::window_active() { 80 } else { 400 };
+            // tv: a frame is tens of ms of its cpu + gpu, so its ambient animations tick at 8 Hz (spinner steps match)
+            let ms = if !anim::window_active() { 400 } else if crate::tv::enabled() { 125 } else { 80 };
             Timer::after(std::time::Duration::from_millis(ms)).await;
+            // tv: a key press is answered first (an ambient frame is ~40 ms of cpu + gpu the key would queue behind)
+            if crate::tv::enabled() && anim::input_within(400) {
+                continue;
+            }
             let w = anim::take();
             if w == 0 {
                 if this.upgrade().is_none() {
@@ -557,6 +562,7 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _t = crate::ui::rtime::guard("workspace");
         crate::ui::frame_begin();
         crate::ui::set_viewport_h(f32::from(window.viewport_size().height));
         crate::ui::anim::area(crate::ui::anim::WORKSPACE);
@@ -869,8 +875,8 @@ impl Workspace {
                     .mt(px(2.))
                     .cursor_pointer()
                     .child(logo(24., cx))
-                    .when(alert, |d| d.child(div().absolute().top(px(-3.)).right(px(-4.)).child(dot(alert_col, 9.).border_2().border_color(k.rail)).child(probe("logo.dot"))))
-                    .child(probe("logo"))
+                    .when(alert, |d| d.child(div().absolute().top(px(-3.)).right(px(-4.)).child(dot(alert_col, 9.).border_2().border_color(k.rail)).children(probe("logo.dot"))))
+                    .children(probe("logo"))
                     .when(ws_on, |d| d.child(div().absolute().left(px(-12.)).top(px(2.)).bottom(px(2.)).w(px(2.)).rounded(px(2.)).bg(k.accent)))
                     .tooltip(tooltip(format!("{} · Workspaces (⇧⌘O){}", ws_name, if ws_on { " (click to hide the sidebar)" } else { "" })))
                     .on_click(cx.listener(|w, _, _, cx| w.pick(View::Workspaces, cx))),
@@ -894,7 +900,7 @@ impl Workspace {
                 .hover(move |s| s.bg(k2.hover))
                 .tooltip(tooltip(if open { "Hide the sidebar (⌘B)" } else { "Show the sidebar (⌘B)" }))
                 .child(icon(if open { "panel-left-close" } else { "panel-left-open" }, 19., k.muted))
-                .child(probe("rail.toggle"))
+                .children(probe("rail.toggle"))
                 .on_click(cx.listener(move |w, _, _, cx| w.set_side_open(!open, cx))),
         );
         rail
@@ -915,7 +921,7 @@ impl Workspace {
             .cursor_pointer()
             .tooltip(tooltip(format!("{}{}", v.label(), if on { " (click to hide the sidebar)" } else { "" })))
             .child(icon(v.icon(), 21., col).hover(move |s| s.text_color(hover)))
-            .child(probe(format!("rail.{}", v.label().to_lowercase())))
+            .children(probe(format!("rail.{}", v.label().to_lowercase())))
             .when(on, |d| d.child(div().absolute().left(px(-4.)).top(px(9.)).bottom(px(9.)).w(px(2.)).rounded(px(2.)).bg(k.accent)))
             .when(badge > 0, |d| {
                 d.child(
@@ -959,7 +965,7 @@ impl Workspace {
             .child(div().flex_1());
         if view == View::Tasks {
             head = head
-                .child(icon_btn("scope", "layers", 15., cx).when(scope_all, |d| d.bg(k.hover)).tooltip(tooltip(if scope_all { "show the current task's subtree" } else { "show every task" })).child(probe("side.scope")).on_click(cx.listener(|w, _, _, cx| {
+                .child(icon_btn("scope", "layers", 15., cx).when(scope_all, |d| d.bg(k.hover)).tooltip(tooltip(if scope_all { "show the current task's subtree" } else { "show every task" })).children(probe("side.scope")).on_click(cx.listener(|w, _, _, cx| {
                     w.state.update(cx, |s, cx| {
                         s.prefs.task_scope_all = !s.prefs.task_scope_all;
                         s.save_prefs();
@@ -973,10 +979,10 @@ impl Workspace {
                         cx.notify();
                     })
                 })))
-                .when(!ended, |d| d.child(icon_btn("side-new", "plus", 16., cx).tooltip(tooltip("new task under the current one (⌘N)")).child(probe("side.new")).on_click(cx.listener(|w, _, window, cx| dialogs::open_new_task(w, None, window, cx)))));
+                .when(!ended, |d| d.child(icon_btn("side-new", "plus", 16., cx).tooltip(tooltip("new task under the current one (⌘N)")).children(probe("side.new")).on_click(cx.listener(|w, _, window, cx| dialogs::open_new_task(w, None, window, cx)))));
         }
         if view == View::Context && pinned {
-            head = head.child(btn_small("follow", "follow latest", Tone::Ghost, cx).child(probe("ctx.follow")).on_click(cx.listener(|w, _, _, cx| {
+            head = head.child(btn_small("follow", "follow latest", Tone::Ghost, cx).children(probe("ctx.follow")).on_click(cx.listener(|w, _, _, cx| {
                 w.state.update(cx, |s, cx| {
                     s.pinned_request = false;
                     cx.notify();
@@ -1007,7 +1013,7 @@ impl Workspace {
             .w(px(6.))
             .cursor_col_resize()
             .hover(|s| s.bg(k.accent.opacity(0.25)))
-            .child(probe("side.resizer"))
+            .children(probe("side.resizer"))
             .on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, _, cx| {
                 ws.resizing = Some((f32::from(e.position.x), w));
                 cx.notify();
@@ -1024,7 +1030,7 @@ impl Workspace {
             .bg(k.bg2)
             .border_r_1()
             .border_color(k.line)
-            .child(probe("sidebar"))
+            .children(probe("sidebar"))
             .child(head)
             .child(div().id("sidebody").flex_1().min_h_0().overflow_hidden().child(body))
             .when(!narrow, |d| d.child(resizer))
@@ -1059,16 +1065,16 @@ impl Workspace {
                             .flex()
                             .gap(px(8.))
                             .mt(px(6.))
-                            .child(btn("empty-add", "Add engine…", Tone::Primary, cx).child(probe("empty.add")).on_click(cx.listener(|w, _, window, cx| crate::workspaces::open_add_engine(w, window, cx))))
-                            .child(btn("empty-menu", "Workspaces…", Tone::Plain, cx).child(probe("empty.menu")).on_click(cx.listener(|w, _, _, cx| crate::workspaces::open_panel(w, cx)))),
+                            .child(btn("empty-add", "Add engine…", Tone::Primary, cx).children(probe("empty.add")).on_click(cx.listener(|w, _, window, cx| crate::workspaces::open_add_engine(w, window, cx))))
+                            .child(btn("empty-menu", "Workspaces…", Tone::Plain, cx).children(probe("empty.menu")).on_click(cx.listener(|w, _, _, cx| crate::workspaces::open_panel(w, cx)))),
                     )
-                    .child(probe("empty")),
+                    .children(probe("empty")),
             );
         }
         ed = ed.child(crate::tabs::tab_strip(self, window, cx));
         ed = ed.child(crate::tabs::task_bar(self, window, cx));
         // a click in the feed leaves the composer (so M dictates, as outside a text field in the web app)
-        ed = ed.child(div().flex_1().min_h_0().child(AnyView::from(self.feed.clone()).cached(StyleRefinement::default().size_full())).child(probe("feed")).on_mouse_down(MouseButton::Left, cx.listener(|w, _, window, cx| window.focus(&w.focus, cx))));
+        ed = ed.child(div().flex_1().min_h_0().child(AnyView::from(self.feed.clone()).cached(StyleRefinement::default().size_full())).children(probe("feed")).on_mouse_down(MouseButton::Left, cx.listener(|w, _, window, cx| window.focus(&w.focus, cx))));
         if ended {
             ed = ed.child(crate::tabs::endbar(self, cx));
         } else {

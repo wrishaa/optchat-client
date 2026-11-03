@@ -152,13 +152,13 @@ impl Render for WorkspacesPanel {
                     .child(
                         icon_btn(SharedString::from(format!("wsp-rm-{ei}")), "x", 12., cx)
                             .tooltip(tooltip(format!("Remove {}", e.cfg.name)))
-                            .child(probe(format!("wsp.remove.{ei}")))
+                            .children(probe(format!("wsp.remove.{ei}")))
                             .on_click(move |_, _, cx| {
                                 let ep = ep.clone();
                                 st.update(cx, |s, cx| s.remove_engine(&ep, cx))
                             }),
                     )
-                    .child(probe(format!("wsp.engine.{ei}"))),
+                    .children(probe(format!("wsp.engine.{ei}"))),
             );
             let connected: Vec<&WsMeta> = meta.iter().filter(|m| m.endpoint == e.cfg.endpoint).collect();
             let is_default = |n: &str| e.workspaces.iter().any(|w| w.name == n && w.default);
@@ -197,7 +197,7 @@ impl Render for WorkspacesPanel {
                             d.child(
                                 icon_btn(SharedString::from(format!("wsp-x-{key}")), "x", 12., cx)
                                     .tooltip(tooltip(format!("Disconnect {name}")))
-                                    .child(probe(format!("wsp.disc.{}", m.ws)))
+                                    .children(probe(format!("wsp.disc.{}", m.ws)))
                                     .on_click(cx.listener(move |p, _, _, cx| {
                                         cx.stop_propagation();
                                         let key = key3.clone();
@@ -205,7 +205,7 @@ impl Render for WorkspacesPanel {
                                     })),
                             )
                         })
-                        .child(probe(format!("wsp.ws.{}", m.ws)))
+                        .children(probe(format!("wsp.ws.{}", m.ws)))
                         .on_click(cx.listener(move |p, _, _, cx| {
                             let key = key2.clone();
                             p.state.update(cx, |s, cx| s.switch_ws(&key, cx));
@@ -228,7 +228,7 @@ impl Render for WorkspacesPanel {
                         .min_h(px(26.))
                         .child(chevron(format!("wsp-ch-{ei}"), 12., k.faint, open))
                         .child(div().text_size(px(11.5)).text_color(k.faint).child(format!("{} disabled", disabled.len())))
-                        .child(probe(format!("wsp.disabled.{ei}")))
+                        .children(probe(format!("wsp.disabled.{ei}")))
                         .on_click(cx.listener(move |p, _, _, cx| {
                             if !p.disabled_open.remove(&ep) {
                                 p.disabled_open.insert(ep.clone());
@@ -261,7 +261,7 @@ impl Render for WorkspacesPanel {
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .child(div().flex_1().min_w_0().child(Input::new(&self.token).small()).child(probe("wsp.token")))
+                            .child(div().flex_1().min_w_0().child(Input::new(&self.token).small()).children(probe("wsp.token")))
                             .when(can_scan, |d| {
                                 d.child(
                                     div()
@@ -275,18 +275,18 @@ impl Render for WorkspacesPanel {
                                         .justify_center()
                                         .cursor_pointer()
                                         .child(icon("scan-text", 18., k.text2))
-                                        .child(probe("wsp.scan"))
+                                        .children(probe("wsp.scan"))
                                         .on_click(cx.listener(|p, _, window, cx| p.scan(window, cx))),
                                 )
                             }),
                     )
-                    .child(div().child(Input::new(&self.name).small()).child(probe("wsp.name")))
+                    .child(div().child(Input::new(&self.name).small()).children(probe("wsp.name")))
                     .when_some(add_err.clone(), |d, e| d.child(div().text_size(px(11.5)).text_color(k.red).child(e)))
                     .child(
                         div()
                             .flex()
                             .gap(px(6.))
-                            .child(btn_small("wsp-add-go", if busy { "Adding…" } else { "Add" }, Tone::Primary, cx).child(probe("wsp.add.go")).when(!busy, |d| d.on_click(cx.listener(|p, _, _, cx| p.add(cx)))))
+                            .child(btn_small("wsp-add-go", if busy { "Adding…" } else { "Add" }, Tone::Primary, cx).children(probe("wsp.add.go")).when(!busy, |d| d.on_click(cx.listener(|p, _, _, cx| p.add(cx)))))
                             .child(btn_small("wsp-add-cancel", "Cancel", Tone::Ghost, cx).on_click(cx.listener(|p, _, _, cx| p.cancel(cx)))),
                     ),
             );
@@ -296,7 +296,7 @@ impl Render for WorkspacesPanel {
                     .cursor_pointer()
                     .child(icon("plus", 13., k.muted))
                     .child(div().text_size(px(13.)).child("Add engine…"))
-                    .child(probe("wsp.add"))
+                    .children(probe("wsp.add"))
                     .on_click(cx.listener(|p, _, window, cx| p.start_add(window, cx))),
             );
         }
@@ -305,6 +305,6 @@ impl Render for WorkspacesPanel {
             serde_json::json!({ "rows": rows_state, "hasToken": !self.token.read(cx).value().is_empty(), "adding": self.adding, "busy": busy, "err": add_err, "canScan": can_scan,
                 "engines": engines.iter().map(|e| serde_json::json!({ "name": e.cfg.name, "endpoint": e.cfg.endpoint, "online": e.online, "auto": e.cfg.auto, "workspaces": e.workspaces.len() })).collect::<Vec<_>>() }),
         );
-        crate::ui::scroll_body("WorkspacesPanel", col.child(probe("wspanel")).into_any_element())
+        crate::ui::scroll_body("WorkspacesPanel", col.children(probe("wspanel")).into_any_element())
     }
 }

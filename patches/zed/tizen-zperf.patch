@@ -1,0 +1,1055 @@
+diff --git a/crates/gpui/src/taffy.rs b/crates/gpui/src/taffy.rs
+index b9e583a..4c87a3e 100644
+--- a/crates/gpui/src/taffy.rs
++++ b/crates/gpui/src/taffy.rs
+@@ -259,8 +259,10 @@ impl TaffyLayoutEngine {
+                         untransform(available_space.height),
+                     );
+ 
++                    let perf_t = crate::perf_hook::start();
+                     let measured_size: Size<Pixels> =
+                         (node_context.measure)(known_dimensions, available_space, window, cx);
++                    crate::perf_hook::add_measure(perf_t);
+                     snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
+                 },
+             )
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+index f708fdd..8c1271d 100644
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -1,3 +1,52 @@
++/// dev perf hook (optchat tizen): a renderer may install a sink for draw phase timings (ms). Unset = no cost
++/// beyond a OnceLock read per phase.
++pub mod perf_hook {
++    pub static HOOK: std::sync::OnceLock<fn(&'static str, f32)> = std::sync::OnceLock::new();
++    #[inline]
++    pub fn start() -> Option<std::time::Instant> {
++        HOOK.get().map(|_| std::time::Instant::now())
++    }
++    /// per-frame accumulators (microseconds), flushed by `flush` at the end of Window::draw
++    pub static LAYOUT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    pub static LAYOUT_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    pub fn add_layout(t: Option<std::time::Instant>) {
++        if let (Some(t), Some(f)) = (t, HOOK.get()) {
++            f("gLayoutCall", t.elapsed().as_secs_f32() * 1000.0);
++        }
++        if let Some(t) = t {
++            LAYOUT_US.fetch_add(t.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
++            LAYOUT_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        }
++    }
++    pub static MEASURE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    pub static MEASURE_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    pub static NODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    pub fn add_measure(t: Option<std::time::Instant>) {
++        if let Some(t) = t {
++            MEASURE_US.fetch_add(t.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
++            MEASURE_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        }
++    }
++    pub fn add_nodes(n: u64) {
++        NODES.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
++    }
++    pub fn flush() {
++        if let Some(f) = HOOK.get() {
++            f("gMeasure", MEASURE_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0);
++            f("gMeasureCalls", MEASURE_N.swap(0, std::sync::atomic::Ordering::Relaxed) as f32);
++            f("gLayoutNodes", NODES.swap(0, std::sync::atomic::Ordering::Relaxed) as f32);
++            f("gComputeLayout", LAYOUT_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0);
++            f("gComputeLayoutCalls", LAYOUT_N.swap(0, std::sync::atomic::Ordering::Relaxed) as f32);
++        }
++    }
++    #[inline]
++    pub fn end(name: &'static str, t: Option<std::time::Instant>) {
++        if let (Some(f), Some(t)) = (HOOK.get(), t) {
++            f(name, t.elapsed().as_secs_f32() * 1000.0)
++        }
++    }
++}
++
+ #[cfg(feature = "profiler")]
+ use crate::DebugFrameOverlayMode;
+ #[cfg(any(feature = "inspector", debug_assertions))]
+@@ -3431,6 +3480,14 @@ impl Window {
+     /// the contents of the new [`Scene`], use [`Self::present`].
+     #[profiling::function]
+     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
++        let perf_t = perf_hook::start();
++        let r = self.draw_inner_perf(cx);
++        perf_hook::end("gWindowDraw", perf_t);
++        perf_hook::flush();
++        r
++    }
++
++    fn draw_inner_perf(&mut self, cx: &mut App) -> ArenaClearNeeded {
+         // Drain every draw in profiler builds so a previous frame's
+         // first-invalidation timestamp can't be attributed to this one.
+         #[cfg(feature = "profiler")]
+@@ -3706,12 +3763,16 @@ impl Window {
+         // fill the window when their size is `auto`.
+         let scale_factor = self.scale_factor();
+         let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
++        let perf_t = perf_hook::start();
+         let root_layout_id = root_element.request_layout(self, cx);
++        perf_hook::end("gRequestLayout", perf_t);
++        let perf_t = perf_hook::start();
+         self.layout_engine
+             .as_mut()
+             .unwrap()
+             .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
+         root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
++        perf_hook::end("gLayoutPrepaint", perf_t);
+ 
+         #[cfg(any(feature = "inspector", debug_assertions))]
+         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
+@@ -3745,7 +3806,9 @@ impl Window {
+ 
+         // Now actually paint the elements.
+         self.invalidator.set_phase(DrawPhase::Paint);
++        let perf_t = perf_hook::start();
+         root_element.paint(self, cx);
++        perf_hook::end("gPaint", perf_t);
+ 
+         #[cfg(any(feature = "inspector", debug_assertions))]
+         self.paint_inspector(inspector_element, cx);
+@@ -5258,7 +5321,9 @@ impl Window {
+         self.invalidator.debug_assert_prepaint();
+ 
+         let mut layout_engine = self.layout_engine.take().unwrap();
++        let perf_t = perf_hook::start();
+         layout_engine.compute_layout(layout_id, available_space, self, cx);
++        perf_hook::add_layout(perf_t);
+         self.layout_engine = Some(layout_engine);
+     }
+ 
+diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/src/linux/wayland/client.rs
+index 38dbbc4..87de876 100644
+--- a/crates/gpui_linux/src/linux/wayland/client.rs
++++ b/crates/gpui_linux/src/linux/wayland/client.rs
+@@ -2198,15 +2198,24 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+             wl_keyboard::Event::Key {
+                 serial,
+                 key,
++                time,
+                 state: WEnum::Value(key_state),
+                 ..
+             } => {
+                 if key_state == wl_keyboard::KeyState::Pressed {
+                     state.serial_tracker.update(SerialKind::KeyPress, serial);
+                 }
++                if gpui_wgpu::perf::ENABLED && key_state == wl_keyboard::KeyState::Pressed {
++                    // the compositor's event time is CLOCK_MONOTONIC ms on tizen's enlightenment
++                    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
++                    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
++                    let now_ms = (ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000) as u32;
++                    let lag = now_ms.wrapping_sub(time) as f32;
++                    gpui_wgpu::perf::mark_input(&format!("k{key}"), (lag < 60_000.0).then_some(lag));
++                }
+ 
+                 #[cfg(feature = "tizen")]
+-                log::info!(
++                log::debug!(
+                     "tizen key raw={key} state={key_state:?} focused={} keymap={} sym={:?}",
+                     state.keyboard_focused_window.is_some(),
+                     state.keymap_state.is_some(),
+diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
+index c3fdcf6..3f0e5f3 100644
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -976,12 +976,14 @@ impl WaylandWindowStatePtr {
+             self.frame_loop.set(FrameLoop::Parked);
+             return;
+         };
++        gpui_wgpu::perf::frame_begin();
+         request_frame_callback(RequestFrameOptions {
+             force_render,
+             require_presentation,
+             signal_at,
+             signal_source,
+         });
++        gpui_wgpu::perf::frame_end();
+         self.update_ime_enabled();
+         drop(callbacks);
+ 
+diff --git a/crates/gpui_wgpu/Cargo.toml b/crates/gpui_wgpu/Cargo.toml
+index 4e81f3a..6c47ff7 100644
+--- a/crates/gpui_wgpu/Cargo.toml
++++ b/crates/gpui_wgpu/Cargo.toml
+@@ -18,6 +18,8 @@ bench-support = ["gpui/bench-support", "dep:image"]
+ font-kit = ["dep:font-kit"]
+ # dev-only: screenshot readback of presented frames (see src/frame_capture.rs)
+ frame-capture = []
++# dev-only: frame / draw / input-to-present counters (see src/perf.rs)
++perf-counters = []
+ test-support = ["gpui/test-support", "dep:image"]
+ 
+ [dependencies]
+diff --git a/crates/gpui_wgpu/src/gpui_wgpu.rs b/crates/gpui_wgpu/src/gpui_wgpu.rs
+index 2c85eb6..d061211 100644
+--- a/crates/gpui_wgpu/src/gpui_wgpu.rs
++++ b/crates/gpui_wgpu/src/gpui_wgpu.rs
+@@ -1,6 +1,9 @@
+ mod cosmic_text_system;
+ #[cfg(feature = "frame-capture")]
+ pub mod frame_capture;
++/// dev-only frame / input counters (feature perf-counters; empty fns otherwise)
++pub mod perf;
++mod quad_cull;
+ mod wgpu_atlas;
+ mod wgpu_context;
+ mod wgpu_renderer;
+diff --git a/crates/gpui_wgpu/src/perf.rs b/crates/gpui_wgpu/src/perf.rs
+new file mode 100644
+index 0000000..13d8018
+--- /dev/null
++++ b/crates/gpui_wgpu/src/perf.rs
+@@ -0,0 +1,236 @@
++//! dev-only frame / input counters (feature `perf-counters`, off by default; the tizen tv shell's `build.sh --perf`).
++//! Without the feature every hook is an empty inline fn, so callers (gpui_linux wayland, the renderer) need no cfg.
++//! Measures, on the ui thread:
++//! - `frame`: one platform frame tick (gpui layout + paint + our draw), wall ms
++//! - `draw`: the renderer's part of it (acquire + encode + submit + present), wall ms
++//! - `present gap`: ms between consecutive presents (fps and dropped frames while something animates / scrolls)
++//! - `input to present`: from a key event reaching the client to the first present after it
++//! - `first present`: since process start (cold start, /proc/self/stat starttime)
++//! `take()` returns the stats since the last call as json and resets them.
++
++#[cfg(feature = "perf-counters")]
++mod imp {
++    use parking_lot::Mutex;
++    use std::time::Instant;
++
++    #[derive(Default)]
++    struct St {
++        frame_t0: Option<Instant>,
++        frames: Vec<f32>,
++        draw_t0: Option<Instant>,
++        draws: Vec<f32>,
++        last_present: Option<Instant>,
++        gaps: Vec<f32>,
++        input_pending: Option<(Instant, String)>,
++        inputs: Vec<(String, f32)>,
++        key_lag: Vec<f32>,
++        first_present_ms: Option<f64>,
++        first_reported: bool,
++        skipped_draws: u32,
++        phases: Vec<(&'static str, Vec<f32>)>,
++    }
++    static ST: Mutex<Option<St>> = Mutex::new(None);
++    fn with<R>(f: impl FnOnce(&mut St) -> R) -> R {
++        let mut g = ST.lock();
++        f(g.get_or_insert_with(St::default))
++    }
++    fn ms(a: Instant, b: Instant) -> f32 {
++        (b - a).as_secs_f32() * 1000.0
++    }
++
++    /// a key reached the client (`what`: a label; `lag_ms`: compositor event time to now, if known)
++    pub fn mark_input(what: &str, lag_ms: Option<f32>) {
++        let now = Instant::now();
++        with(|s| {
++            if s.input_pending.is_none() {
++                s.input_pending = Some((now, what.to_string()));
++            }
++            if let Some(l) = lag_ms {
++                s.key_lag.push(l);
++            }
++        })
++    }
++    pub fn frame_begin() {
++        with(|s| s.frame_t0 = Some(Instant::now()))
++    }
++    /// a named sub-phase, ms since `t0` (renderer acquire / encode / present, ...)
++    pub fn phase(name: &'static str, t0: Instant) {
++        let d = ms(t0, Instant::now());
++        with(|s| match s.phases.iter_mut().find(|p| p.0 == name) {
++            Some(p) => p.1.push(d),
++            None => s.phases.push((name, vec![d])),
++        })
++    }
++    pub fn sample(name: &'static str, v: f32) {
++        with(|s| match s.phases.iter_mut().find(|p| p.0 == name) {
++            Some(p) => p.1.push(v),
++            None => s.phases.push((name, vec![v])),
++        });
++    }
++    pub static SKIP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++    pub fn skip(bit: u32) -> bool {
++        SKIP.load(std::sync::atomic::Ordering::Relaxed) & bit != 0
++    }
++    pub fn set_skip(m: u32) {
++        SKIP.store(m, std::sync::atomic::Ordering::Relaxed)
++    }
++    pub fn now() -> Option<Instant> {
++        Some(Instant::now())
++    }
++    pub fn frame_end() {
++        let now = Instant::now();
++        with(|s| {
++            if let Some(t) = s.frame_t0.take() {
++                s.frames.push(ms(t, now))
++            }
++        })
++    }
++    pub fn draw_begin() {
++        with(|s| s.draw_t0 = Some(Instant::now()))
++    }
++    /// `presented`: false when the draw bailed (lost surface, gpu error) before present
++    pub fn draw_end(presented: bool) {
++        let now = Instant::now();
++        with(|s| {
++            if let Some(t) = s.draw_t0.take() {
++                s.draws.push(ms(t, now))
++            }
++            if !presented {
++                s.skipped_draws += 1;
++                return;
++            }
++            if let Some(p) = s.last_present.replace(now) {
++                s.gaps.push(ms(p, now))
++            }
++            if let Some((t, what)) = s.input_pending.take() {
++                s.inputs.push((what, ms(t, now)))
++            }
++            if s.first_present_ms.is_none() {
++                s.first_present_ms = since_process_start_ms();
++                // the mac log server stamps this line: cold start = its time - the launch command's (the
++                // process start time is useless on tizen: launchpad pre-forks candidate processes)
++                log::info!("perf: first present");
++            }
++        })
++    }
++
++    /// ms since this process started (linux /proc), for cold start
++    fn since_process_start_ms() -> Option<f64> {
++        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
++        let rest = &stat[stat.rfind(')')? + 2..];
++        let start_ticks: f64 = rest.split(' ').nth(19)?.parse().ok()?;
++        unsafe extern "C" {
++            fn sysconf(name: i32) -> isize;
++        }
++        let hz = unsafe { sysconf(2) } as f64; // _SC_CLK_TCK
++        let hz = if hz > 0.0 { hz } else { 100.0 };
++        let up: f64 = std::fs::read_to_string("/proc/uptime").ok()?.split(' ').next()?.parse().ok()?;
++        log::info!("perf: cold start calc uptime {up} start_ticks {start_ticks} hz {hz}");
++        Some((up - start_ticks / hz) * 1000.0)
++    }
++
++    fn summary(v: &mut Vec<f32>) -> String {
++        if v.is_empty() {
++            return "null".into();
++        }
++        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
++        let p = |q: f32| v[((v.len() - 1) as f32 * q).round() as usize];
++        let mean = v.iter().sum::<f32>() / v.len() as f32;
++        format!(
++            "{{\"n\":{},\"mean\":{:.2},\"p50\":{:.2},\"p90\":{:.2},\"p99\":{:.2},\"max\":{:.2}}}",
++            v.len(),
++            mean,
++            p(0.5),
++            p(0.9),
++            p(0.99),
++            v[v.len() - 1]
++        )
++    }
++
++    /// stats since the last take, as json; resets them
++    pub fn take() -> Option<String> {
++        with(|s| {
++            let over_17 = s.gaps.iter().filter(|g| **g > 17.5).count();
++            let dropped: f32 = s.gaps.iter().map(|g| ((g / 16.67).round() - 1.0).max(0.0)).sum();
++            let inputs: Vec<String> = s.inputs.iter().map(|(w, m)| format!("[\"{}\",{:.1}]", w.replace('"', ""), m)).collect();
++            let mut ilat: Vec<f32> = s.inputs.iter().map(|x| x.1).collect();
++            let first = if s.first_reported { None } else { s.first_present_ms };
++            if first.is_some() {
++                s.first_reported = true;
++            }
++            let out = format!(
++                "{{\"frame\":{},\"draw\":{},\"gap\":{},\"gapsOver17\":{},\"droppedEst\":{},\"inputToPresent\":{},\"inputs\":[{}],\"keyLag\":{},\"skippedDraws\":{},\"firstPresentMs\":{},\"phases\":{{{}}}}}",
++                summary(&mut s.frames),
++                summary(&mut s.draws),
++                summary(&mut s.gaps),
++                over_17,
++                dropped,
++                summary(&mut ilat),
++                inputs.join(","),
++                summary(&mut s.key_lag),
++                s.skipped_draws,
++                first.map(|f| format!("{f:.0}")).unwrap_or("null".into()),
++                s.phases.iter_mut().map(|(n, v)| format!("\"{n}\":{}", summary(v))).collect::<Vec<_>>().join(",")
++            );
++            s.phases.clear();
++            s.frames.clear();
++            s.draws.clear();
++            s.gaps.clear();
++            s.inputs.clear();
++            s.key_lag.clear();
++            s.skipped_draws = 0;
++            Some(out)
++        })
++    }
++}
++
++#[cfg(not(feature = "perf-counters"))]
++mod imp {
++    #[inline(always)]
++    pub fn mark_input(_: &str, _: Option<f32>) {}
++    #[inline(always)]
++    pub fn frame_begin() {}
++    #[inline(always)]
++    pub fn frame_end() {}
++    #[inline(always)]
++    pub fn draw_begin() {}
++    #[inline(always)]
++    pub fn draw_end(_: bool) {}
++    #[inline(always)]
++    pub fn phase(_: &'static str, _: ()) {}
++    #[inline(always)]
++    pub fn sample(_: &'static str, _: f32) {}
++    #[inline(always)]
++    pub fn skip(_: u32) -> bool {
++        false
++    }
++    pub fn set_skip(_: u32) {}
++    pub fn now() -> Option<()> {
++        None
++    }
++    #[inline(always)]
++    pub fn take() -> Option<String> {
++        None
++    }
++}
++
++pub use imp::*;
++
++/// true when the counters are compiled in
++pub const ENABLED: bool = cfg!(feature = "perf-counters");
++
++/// startup timing: logs `perf lap <name> <ms>` when dropped
++#[cfg(feature = "perf-counters")]
++pub struct Lap(&'static str, String, std::time::Instant);
++#[cfg(feature = "perf-counters")]
++impl Lap {
++    pub fn new(name: &str) -> Self {
++        Lap("", name.to_string(), std::time::Instant::now())
++    }
++}
++#[cfg(feature = "perf-counters")]
++impl Drop for Lap {
++    fn drop(&mut self) {
++        log::info!("perf lap {} {:.1}ms", self.1, self.2.elapsed().as_secs_f64() * 1000.0);
++    }
++}
+diff --git a/crates/gpui_wgpu/src/quad_cull.rs b/crates/gpui_wgpu/src/quad_cull.rs
+new file mode 100644
+index 0000000..ab3c71c
+--- /dev/null
++++ b/crates/gpui_wgpu/src/quad_cull.rs
+@@ -0,0 +1,170 @@
++//! Overdraw culling for opaque nested backgrounds (optchat tizen perf).
++//!
++//! UIs often paint the same opaque background several times: window, pane, list, composer. On weak tilers (the
++//! Samsung TV's Mali-G31) every covered pixel still runs the quad fragment shader, and those redundant layers were most
++//! of the frame's GPU time. A quad Q is culled (drawn with zero size) when an earlier quad P:
++//!   * is an opaque solid, unrounded, borderless quad of exactly Q's colour (Q is solid opaque borderless too), and
++//!   * fully contains Q's visible area (bounds clipped to the content mask), and
++//!   * nothing else in the scene with a draw order in [P.order, Q.order] touches Q's visible area.
++//! Then Q would repaint pixels with the colour they already have, so skipping it leaves the frame identical.
++
++use gpui::{Bounds, Quad, Scene, ScaledPixels};
++
++#[derive(Clone, Copy)]
++struct R {
++    x0: f32,
++    y0: f32,
++    x1: f32,
++    y1: f32,
++}
++
++impl R {
++    fn of(b: &Bounds<ScaledPixels>) -> R {
++        R { x0: b.origin.x.0, y0: b.origin.y.0, x1: b.origin.x.0 + b.size.width.0, y1: b.origin.y.0 + b.size.height.0 }
++    }
++    fn clip(self, o: R) -> R {
++        R { x0: self.x0.max(o.x0), y0: self.y0.max(o.y0), x1: self.x1.min(o.x1), y1: self.y1.min(o.y1) }
++    }
++    fn empty(&self) -> bool {
++        self.x1 <= self.x0 || self.y1 <= self.y0
++    }
++    fn contains(&self, o: &R) -> bool {
++        self.x0 <= o.x0 && self.y0 <= o.y0 && self.x1 >= o.x1 && self.y1 >= o.y1
++    }
++    fn hits(&self, o: &R) -> bool {
++        self.x0 < o.x1 && o.x0 < self.x1 && self.y0 < o.y1 && o.y0 < self.y1
++    }
++    fn grow(self, d: f32) -> R {
++        R { x0: self.x0 - d, y0: self.y0 - d, x1: self.x1 + d, y1: self.y1 + d }
++    }
++}
++
++fn visible(q: &Quad) -> R {
++    R::of(&q.bounds).clip(R::of(&q.content_mask.bounds))
++}
++
++fn plain(q: &Quad) -> bool {
++    let b = &q.border_widths;
++    b.top.0 == 0.0 && b.right.0 == 0.0 && b.bottom.0 == 0.0 && b.left.0 == 0.0
++}
++
++fn square(q: &Quad) -> bool {
++    let r = &q.corner_radii;
++    r.top_left.0 == 0.0 && r.top_right.0 == 0.0 && r.bottom_right.0 == 0.0 && r.bottom_left.0 == 0.0
++}
++
++fn opaque_solid(q: &Quad) -> Option<gpui::Hsla> {
++    q.background.as_solid().filter(|c| c.a >= 1.0)
++}
++
++/// does any primitive other than quads `skip_a`/`skip_b` with order in [lo, hi] touch `r`?
++fn blocked(scene: &Scene, lo: u32, hi: u32, r: &R, skip_a: usize, skip_b: usize) -> bool {
++    fn any<T>(v: &[T], lo: u32, hi: u32, order: impl Fn(&T) -> u32, hit: impl Fn(usize, &T) -> bool) -> bool {
++        let start = v.partition_point(|x| order(x) < lo);
++        v[start..].iter().enumerate().take_while(|(_, x)| order(x) <= hi).any(|(i, x)| hit(start + i, x))
++    }
++    any(&scene.quads, lo, hi, |q| q.order, |i, q| i != skip_a && i != skip_b && visible(q).hits(r))
++        || any(&scene.shadows, lo, hi, |s| s.order, |_, s| {
++            // a shadow's blur reaches past its bounds: be generous
++            R::of(&s.bounds).grow(s.blur_radius.0 * 3.0 + 2.0).clip(R::of(&s.content_mask.bounds)).hits(r)
++        })
++        || any(&scene.paths, lo, hi, |p| p.order, |_, p| R::of(&p.bounds).hits(r))
++        || any(&scene.underlines, lo, hi, |u| u.order, |_, u| R::of(&u.bounds).hits(r))
++        || any(&scene.monochrome_sprites, lo, hi, |s| s.order, |_, s| R::of(&s.bounds).hits(r))
++        || any(&scene.subpixel_sprites, lo, hi, |s| s.order, |_, s| R::of(&s.bounds).hits(r))
++        || any(&scene.polychrome_sprites, lo, hi, |s| s.order, |_, s| R::of(&s.bounds).hits(r))
++        || any(&scene.surfaces, lo, hi, |s| s.order, |_, s| R::of(&s.bounds).hits(r))
++}
++
++thread_local!(static BASE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) });
++
++/// When the scene's first primitive is an opaque square borderless quad covering the whole target, return its
++/// colour: the render pass clears to it and `cull` drops the quad (a clear is ~free on tilers, a full-screen fill
++/// is not). Remembered for the following `cull` call of the same frame.
++pub fn base_clear(scene: &Scene, width: f32, height: f32) -> Option<gpui::Rgba> {
++    BASE.with(|b| b.set(None));
++    if crate::perf::skip(128) {
++        return None;
++    }
++    let q = scene.quads.first()?;
++    let c = opaque_solid(q).filter(|_| square(q) && plain(q))?;
++    if !visible(q).contains(&R { x0: 0.0, y0: 0.0, x1: width, y1: height }) {
++        return None;
++    }
++    // nothing may be drawn before it (ties count as before: batch order within an order is by kind)
++    let before = |o: Option<u32>| o.is_some_and(|o| o <= q.order);
++    if scene.quads.get(1).is_some_and(|x| x.order == q.order)
++        || before(scene.shadows.first().map(|x| x.order))
++        || before(scene.paths.first().map(|x| x.order))
++        || before(scene.underlines.first().map(|x| x.order))
++        || before(scene.monochrome_sprites.first().map(|x| x.order))
++        || before(scene.subpixel_sprites.first().map(|x| x.order))
++        || before(scene.polychrome_sprites.first().map(|x| x.order))
++        || before(scene.surfaces.first().map(|x| x.order))
++    {
++        return None;
++    }
++    BASE.with(|b| b.set(Some(0)));
++    Some(gpui::Rgba::from(c))
++}
++
++/// the scene's quads with redundant ones collapsed to zero size, or None when nothing could be culled
++pub fn cull(scene: &Scene) -> Option<Vec<Quad>> {
++    if crate::perf::skip(128) {
++        return None;
++    }
++    let quads = &scene.quads;
++    let base = BASE.with(|b| b.take());
++    // candidate covers: opaque, square, borderless quads (usually a handful of pane backgrounds)
++    let covers: Vec<usize> = (0..quads.len()).filter(|&i| square(&quads[i]) && plain(&quads[i]) && opaque_solid(&quads[i]).is_some()).collect();
++    let mut out: Option<Vec<Quad>> = None;
++    if let Some(i) = base {
++        out.get_or_insert_with(|| quads.clone())[i].bounds.size = gpui::Size::default();
++    }
++    if covers.len() < 2 {
++        return out;
++    }
++    for &j in covers.iter().skip(1) {
++        let q = &quads[j];
++        let color = opaque_solid(q);
++        let vq = visible(q);
++        if vq.empty() {
++            continue;
++        }
++        // the nearest earlier cover of the same colour that contains q
++        let Some(&i) = covers.iter().rev().filter(|&&i| i < j).find(|&&i| {
++            let p = &quads[i];
++            p.order < q.order && opaque_solid(p) == color && visible(p).contains(&vq)
++        }) else {
++            continue;
++        };
++        if blocked(scene, quads[i].order, q.order, &vq, i, j) {
++            continue;
++        }
++        let v = out.get_or_insert_with(|| quads.clone());
++        v[j].bounds.size = gpui::Size::default();
++        crate::perf::sample("culledArea", (vq.x1 - vq.x0) * (vq.y1 - vq.y0));
++    }
++    out
++}
++
++/// quads fs_quad_simple draws exactly like fs_quad: solid background, square corners, no border
++/// solid background and solid border, any radii / border widths: fs_quad_lean (no gradient, no dashes)
++pub fn lean(q: &Quad) -> bool {
++    q.background.as_solid().is_some() && matches!(q.border_style, gpui::BorderStyle::Solid)
++}
++
++/// 0 simple, 1 lean, 2 full fs_quad
++pub fn kind(q: &Quad) -> u8 {
++    if simple(q) {
++        0
++    } else if lean(q) && !crate::perf::skip(2048) {
++        1
++    } else {
++        2
++    }
++}
++
++pub fn simple(q: &Quad) -> bool {
++    q.background.as_solid().is_some() && square(q) && plain(q)
++}
+diff --git a/crates/gpui_wgpu/src/shaders.wgsl b/crates/gpui_wgpu/src/shaders.wgsl
+index 718cb75..2472466 100644
+--- a/crates/gpui_wgpu/src/shaders.wgsl
++++ b/crates/gpui_wgpu/src/shaders.wgsl
+@@ -536,6 +536,13 @@ struct QuadVarying {
+     @location(3) @interpolate(flat) background_solid: vec4<f32>,
+     @location(4) @interpolate(flat) background_color0: vec4<f32>,
+     @location(5) @interpolate(flat) background_color1: vec4<f32>,
++    // Device-space rect (x0, y0, x1, y1) whose pixels are plain solid background: lets fs_quad skip
++    // load_quad, which on the WebGL/GLES instance-texture path costs 10 texel fetches per pixel.
++    @location(6) @interpolate(flat) solid_inner: vec4<f32>,
++    // fs_quad_lean's quad (no load_quad there): bounds (origin, size), radii (tl, tr, br, bl), borders (t, r, b, l)
++    @location(7) @interpolate(flat) q_bounds: vec4<f32>,
++    @location(8) @interpolate(flat) q_radii: vec4<f32>,
++    @location(9) @interpolate(flat) q_borders: vec4<f32>,
+ }
+ 
+ @vertex
+@@ -558,9 +565,101 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
+     out.border_color = hsla_to_rgba(quad.border_color);
+     out.quad_id = instance_id;
+     out.clip_distances = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
++    var inner = vec4<f32>(1.0, 1.0, -1.0, -1.0);
++    if (quad.background.tag == 0u) {
++        let r = max(max(quad.corner_radii.top_left, quad.corner_radii.top_right),
++                    max(quad.corner_radii.bottom_right, quad.corner_radii.bottom_left));
++        let b = max(max(quad.border_widths.top, quad.border_widths.right),
++                    max(quad.border_widths.bottom, quad.border_widths.left));
++        var inset = 0.0;
++        if (r > 0.0 || b > 0.0) {
++            inset = max(r, b) + 1.0;
++        }
++        inner = vec4<f32>(quad.bounds.origin + vec2<f32>(inset),
++                          quad.bounds.origin + quad.bounds.size - vec2<f32>(inset));
++    }
++    out.solid_inner = inner;
++    out.q_bounds = vec4<f32>(quad.bounds.origin, quad.bounds.size);
++    let cr = quad.corner_radii;
++    out.q_radii = vec4<f32>(cr.top_left, cr.top_right, cr.bottom_right, cr.bottom_left);
++    let bw = quad.border_widths;
++    out.q_borders = vec4<f32>(bw.top, bw.right, bw.bottom, bw.left);
+     return out;
+ }
+ 
++// Rounded and / or bordered quads with a solid background and a solid border (quad_cull::lean): fs_quad's SDF
++// without load_quad, gradients or dashes. On the TV's Mali-G31 the full fs_quad cost ~23 ms a frame for 0.13
++// screens of such quads (register pressure of the big shader), whatever branch the pixels took.
++@fragment
++fn fs_quad_lean(input: QuadVarying) -> @location(0) vec4<f32> {
++    if (any(input.clip_distances < vec4<f32>(0.0))) {
++        return vec4<f32>(0.0);
++    }
++    let p = input.position.xy;
++    let background_color = input.background_solid;
++    if (p.x >= input.solid_inner.x && p.y >= input.solid_inner.y &&
++            p.x <= input.solid_inner.z && p.y <= input.solid_inner.w) {
++        return blend_color(background_color, 1.0);
++    }
++    let radii = Corners(input.q_radii.x, input.q_radii.y, input.q_radii.z, input.q_radii.w);
++    let size = input.q_bounds.zw;
++    let half_size = size / 2.0;
++    let point = p - input.q_bounds.xy;
++    let center_to_point = point - half_size;
++    let antialias_threshold = 0.5;
++    let corner_radius = pick_corner_radius(center_to_point, radii);
++    let border = vec2<f32>(
++        select(input.q_borders.y, input.q_borders.w, center_to_point.x < 0.0),
++        select(input.q_borders.z, input.q_borders.x, center_to_point.y < 0.0));
++    let reduced_border =
++        vec2<f32>(select(border.x, -antialias_threshold, border.x == 0.0),
++                  select(border.y, -antialias_threshold, border.y == 0.0));
++    let corner_to_point = abs(center_to_point) - half_size;
++    let corner_center_to_point = corner_to_point + corner_radius;
++    let is_near_rounded_corner = corner_center_to_point.x >= 0 && corner_center_to_point.y >= 0;
++    let straight_border_inner_corner_to_point = corner_to_point + reduced_border;
++    let is_beyond_inner_straight_border =
++            straight_border_inner_corner_to_point.x > 0 ||
++            straight_border_inner_corner_to_point.y > 0;
++    let is_within_inner_straight_border =
++        straight_border_inner_corner_to_point.x < -antialias_threshold &&
++        straight_border_inner_corner_to_point.y < -antialias_threshold;
++    if (is_within_inner_straight_border && !is_near_rounded_corner) {
++        return blend_color(background_color, 1.0);
++    }
++    let outer_sdf = quad_sdf_impl(corner_center_to_point, corner_radius);
++    var inner_sdf = 0.0;
++    if (corner_center_to_point.x <= 0 || corner_center_to_point.y <= 0) {
++        inner_sdf = -max(straight_border_inner_corner_to_point.x,
++                         straight_border_inner_corner_to_point.y);
++    } else if (is_beyond_inner_straight_border) {
++        inner_sdf = -1.0;
++    } else if (reduced_border.x == reduced_border.y) {
++        inner_sdf = -(outer_sdf + reduced_border.x);
++    } else {
++        let ellipse_radii = max(vec2<f32>(0.0), corner_radius - reduced_border);
++        inner_sdf = quarter_ellipse_sdf(corner_center_to_point, ellipse_radii);
++    }
++    let border_sdf = max(inner_sdf, outer_sdf);
++    var color = background_color;
++    if (border_sdf < antialias_threshold) {
++        let blended_border = over(background_color, input.border_color);
++        color = mix(background_color, blended_border,
++                    saturate(antialias_threshold - inner_sdf));
++    }
++    return blend_color(color, saturate(antialias_threshold - outer_sdf));
++}
++
++// Lean variant for square, borderless, solid-background quads (picked on the CPU, see quad_cull::simple): no
++// load_quad and none of the SDF code, so weak GPUs keep their registers for the big pane fills.
++@fragment
++fn fs_quad_simple(input: QuadVarying) -> @location(0) vec4<f32> {
++    if (any(input.clip_distances < vec4<f32>(0.0))) {
++        return vec4<f32>(0.0);
++    }
++    return blend_color(input.background_solid, 1.0);
++}
++
+ @fragment
+ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
+     // Alpha clip first, since we don't have `clip_distance`.
+@@ -568,6 +667,12 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
+         return vec4<f32>(0.0);
+     }
+ 
++    let p = input.position.xy;
++    if (p.x >= input.solid_inner.x && p.y >= input.solid_inner.y &&
++            p.x <= input.solid_inner.z && p.y <= input.solid_inner.w) {
++        return blend_color(input.background_solid, 1.0);
++    }
++
+     let quad = load_quad(input.quad_id);
+ 
+     let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
+diff --git a/crates/gpui_wgpu/src/wgpu_renderer.rs b/crates/gpui_wgpu/src/wgpu_renderer.rs
+index bfb081f..77479d1 100644
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -125,6 +125,8 @@ pub struct WgpuSurfaceConfig {
+ 
+ struct WgpuPipelines {
+     quads: wgpu::RenderPipeline,
++    quads_simple: wgpu::RenderPipeline,
++    quads_lean: wgpu::RenderPipeline,
+     shadows: wgpu::RenderPipeline,
+     path_rasterization: wgpu::RenderPipeline,
+     paths: wgpu::RenderPipeline,
+@@ -691,6 +693,8 @@ impl WgpuRendererCore {
+         } else {
+             STORAGE_BUFFER_SHADERS
+         };
++        #[cfg(feature = "perf-counters")]
++        let _t = crate::perf::Lap::new("shader_module");
+         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+             label: Some("gpui_shaders"),
+             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+@@ -728,6 +732,8 @@ impl WgpuRendererCore {
+                                color_targets: &[Option<wgpu::ColorTargetState>],
+                                sample_count: u32,
+                                module: &wgpu::ShaderModule| {
++            #[cfg(feature = "perf-counters")]
++            let _t = crate::perf::Lap::new(name);
+             let mut bind_group_layouts = vec![Some(globals_layout), Some(data_layout)];
+             bind_group_layouts.extend(texture_layout.map(Some));
+             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+@@ -784,6 +790,32 @@ impl WgpuRendererCore {
+             &shader_module,
+         );
+ 
++        let quads_simple = create_pipeline(
++            "quads_simple",
++            "vs_quad",
++            "fs_quad_simple",
++            &layouts.globals,
++            &layouts.instances,
++            None,
++            wgpu::PrimitiveTopology::TriangleStrip,
++            &[Some(color_target.clone())],
++            1,
++            &shader_module,
++        );
++
++        let quads_lean = create_pipeline(
++            "quads_lean",
++            "vs_quad",
++            "fs_quad_lean",
++            &layouts.globals,
++            &layouts.instances,
++            None,
++            wgpu::PrimitiveTopology::TriangleStrip,
++            &[Some(color_target.clone())],
++            1,
++            &shader_module,
++        );
++
+         let shadows = create_pipeline(
+             "shadows",
+             "vs_shadow",
+@@ -932,6 +964,8 @@ impl WgpuRendererCore {
+ 
+         WgpuPipelines {
+             quads,
++            quads_simple,
++            quads_lean,
+             shadows,
+             path_rasterization,
+             paths,
+@@ -1121,6 +1155,57 @@ impl WgpuRenderer {
+     }
+ 
+     pub fn draw(&mut self, scene: &Scene) -> bool {
++        if crate::perf::ENABLED {
++            let _ = gpui::perf_hook::HOOK.set(crate::perf::sample);
++            crate::perf::sample("nQuads", scene.quads.len() as f32);
++            crate::perf::sample("nDrawInstanced", OC_DRAWS.swap(0, std::sync::atomic::Ordering::Relaxed) as f32);
++            crate::perf::sample("nBatches", scene.batches().count() as f32);
++            crate::perf::sample("nShadows", scene.shadows.len() as f32);
++            crate::perf::sample("nPaths", scene.paths.len() as f32);
++            crate::perf::sample("nMono", scene.monochrome_sprites.len() as f32);
++            crate::perf::sample("nSubpx", scene.subpixel_sprites.len() as f32);
++            crate::perf::sample("nPoly", scene.polychrome_sprites.len() as f32);
++            let (mut area, mut tarea, mut nt, mut nb, mut big, mut farea) = (0f32, 0f32, 0f32, 0f32, 0f32, 0f32);
++            for q in &scene.quads {
++                let v = q.bounds.intersect(&q.content_mask.bounds);
++                let a = v.size.width.0.max(0.0) * v.size.height.0.max(0.0);
++                area += a;
++                if !crate::quad_cull::simple(q) {
++                    farea += a;
++                    if a > 20_000.0 {
++                        static F: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++                        if F.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 600 < 20 {
++                            log::info!("perf fullquad o={} {:?} bg {:?} border {:?} r {:?}", q.order, v.size, q.background.as_solid(), q.border_widths, q.corner_radii);
++                        }
++                    }
++                }
++                if q.background.is_transparent() { tarea += a; nt += 1.0; }
++                if q.border_widths.top.0 + q.border_widths.left.0 + q.border_widths.right.0 + q.border_widths.bottom.0 > 0.0 { nb += 1.0; }
++                if a > 100_000.0 {
++                    big += 1.0;
++                    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++                    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 400 < 12 {
++                        log::info!("perf bigquad o={} {:?} mask {:?} bg {:?} border {:?} r {:?}", q.order, v, q.content_mask.bounds, q.background.as_solid(), q.border_widths, q.corner_radii);
++                    }
++                }
++            }
++            let screen = (1920.0 * 1080.0) as f32;
++            crate::perf::sample("quadScreens", area / screen);
++            crate::perf::sample("quadFullScreens", farea / screen);
++            crate::perf::sample("nLean", scene.quads.iter().filter(|q| crate::quad_cull::kind(q) == 1).count() as f32);
++            crate::perf::sample("nFull", scene.quads.iter().filter(|q| crate::quad_cull::kind(q) == 2).count() as f32);
++            crate::perf::sample("quadTranspScreens", tarea / screen);
++            crate::perf::sample("nQuadTransp", nt);
++            crate::perf::sample("nQuadBorder", nb);
++            crate::perf::sample("nQuadBig", big);
++        }
++        crate::perf::draw_begin();
++        let presented = self.draw_scene(scene);
++        crate::perf::draw_end(presented);
++        presented
++    }
++
++    fn draw_scene(&mut self, scene: &Scene) -> bool {
+         #[cfg(target_family = "wasm")]
+         if self.device_lost() {
+             if matches!(self.state, RendererState::Ready { .. }) {
+@@ -1164,6 +1249,7 @@ impl WgpuRenderer {
+             self.failed_frame_count = 0;
+         }
+ 
++        let perf_t = crate::perf::now();
+         let frame = match surface.get_current_texture() {
+             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+@@ -1194,6 +1280,8 @@ impl WgpuRenderer {
+         let frame_view = frame
+             .texture
+             .create_view(&wgpu::TextureViewDescriptor::default());
++        if let Some(t) = perf_t { crate::perf::phase("acquire", t); }
++        let perf_t = crate::perf::now();
+         let premultiplied_alpha =
+             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+         if let Err(error) = core.render_frame(
+@@ -1207,7 +1295,10 @@ impl WgpuRenderer {
+             return false;
+         }
+ 
++        if let Some(t) = perf_t { crate::perf::phase("encodeSubmit", t); }
++        let perf_t = crate::perf::now();
+         frame.present();
++        if let Some(t) = perf_t { crate::perf::phase("present", t); }
+         #[cfg(feature = "frame-capture")]
+         if let Some(sink) = crate::frame_capture::take_request() {
+             match core.capture_frame(scene, size, premultiplied_alpha) {
+@@ -1284,6 +1375,8 @@ impl WgpuRendererCore {
+         let dual_source_blending =
+             context.supports_dual_source_blending() && !uses_webgl_instance_data;
+         let bind_group_layouts = Self::create_bind_group_layouts(&device, uses_webgl_instance_data);
++        #[cfg(feature = "perf-counters")]
++        let _t = crate::perf::Lap::new("create_pipelines all");
+         let pipelines = Self::create_pipelines(
+             &device,
+             &bind_group_layouts,
+@@ -1526,6 +1619,10 @@ impl WgpuRendererCore {
+             bytemuck::bytes_of(&gamma_params),
+         );
+ 
++        let clear_color = match crate::quad_cull::base_clear(scene, size.width.0 as f32, size.height.0 as f32) {
++            Some(c) => wgpu::Color { r: c.r as f64, g: c.g as f64, b: c.b as f64, a: c.a as f64 },
++            None => clear_color,
++        };
+         self.record_frame(scene, target_view, clear_color)
+             .inspect_err(|_| {
+                 // Queue writes are staged before encoding; flush them even if the frame fails.
+@@ -1581,18 +1678,43 @@ impl WgpuRendererCore {
+ 
+             for batch in scene.batches() {
+                 match batch {
+-                    PrimitiveBatch::Quads(range) => self.draw_instances(
++                    PrimitiveBatch::Quads(range) if crate::perf::skip(1) => { let _ = range; }
++                    PrimitiveBatch::Quads(range) if crate::perf::skip(256) => self.draw_instances(
+                         &instance_bindings.quads,
+                         &self.resources().pipelines.quads,
+                         instance_range(range),
+                         &mut pass,
+                     ),
++                    PrimitiveBatch::Quads(range) => {
++                        // runs of simple / full quads, in order, each with its own pipeline
++                        let mut start = range.start;
++                        while start < range.end {
++                            let kind = crate::quad_cull::kind(&scene.quads[start]);
++                            let simple = kind == 0;
++                            let mut end = start + 1;
++                            while end < range.end && crate::quad_cull::kind(&scene.quads[end]) == kind {
++                                end += 1;
++                            }
++                            let pipelines = &self.resources().pipelines;
++                            if !simple && crate::perf::skip(512) { start = end; continue; }
++                            if simple && crate::perf::skip(1024) { start = end; continue; }
++                            self.draw_instances(
++                                &instance_bindings.quads,
++                                match kind { 0 => &pipelines.quads_simple, 1 => &pipelines.quads_lean, _ => &pipelines.quads },
++                                instance_range(start..end),
++                                &mut pass,
++                            );
++                            start = end;
++                        }
++                    }
++                    PrimitiveBatch::Shadows(range) if crate::perf::skip(2) => { let _ = range; }
+                     PrimitiveBatch::Shadows(range) => self.draw_instances(
+                         &instance_bindings.shadows,
+                         &self.resources().pipelines.shadows,
+                         instance_range(range),
+                         &mut pass,
+                     ),
++                    PrimitiveBatch::Paths(_) if crate::perf::skip(4) => {}
+                     PrimitiveBatch::Paths(range) => {
+                         let paths = &scene.paths[range];
+                         if paths.is_empty() {
+@@ -1629,12 +1751,14 @@ impl WgpuRendererCore {
+                             )?;
+                         }
+                     }
++                    PrimitiveBatch::Underlines(range) if crate::perf::skip(8) => { let _ = range; }
+                     PrimitiveBatch::Underlines(range) => self.draw_instances(
+                         &instance_bindings.underlines,
+                         &self.resources().pipelines.underlines,
+                         instance_range(range),
+                         &mut pass,
+                     ),
++                    PrimitiveBatch::MonochromeSprites { .. } if crate::perf::skip(16) => {}
+                     PrimitiveBatch::MonochromeSprites { texture_id, range } => {
+                         self.draw_sprites(
+                             &instance_bindings.monochrome_sprites,
+@@ -1644,6 +1768,7 @@ impl WgpuRendererCore {
+                             &mut pass,
+                         )?;
+                     }
++                    PrimitiveBatch::SubpixelSprites { .. } if crate::perf::skip(32) => {}
+                     PrimitiveBatch::SubpixelSprites { texture_id, range } => {
+                         let resources = self.resources();
+                         self.draw_sprites(
+@@ -1658,6 +1783,7 @@ impl WgpuRendererCore {
+                             &mut pass,
+                         )?;
+                     }
++                    PrimitiveBatch::PolychromeSprites { .. } if crate::perf::skip(64) => {}
+                     PrimitiveBatch::PolychromeSprites { texture_id, range } => {
+                         self.draw_sprites(
+                             &instance_bindings.polychrome_sprites,
+@@ -1686,11 +1812,28 @@ impl WgpuRendererCore {
+         scene: &Scene,
+         instance_offset: &mut u64,
+     ) -> Result<InstanceBindings> {
++        let culled = crate::quad_cull::cull(scene);
++        if crate::perf::ENABLED {
++            let (mut a, mut n) = (0f32, 0f32);
++            for q in culled.as_deref().unwrap_or(&scene.quads) {
++                let v = q.bounds.intersect(&q.content_mask.bounds);
++                let x = v.size.width.0.max(0.0) * v.size.height.0.max(0.0);
++                if x > 0.0 { a += x; n += 1.0; }
++                if x > 200_000.0 {
++                    static D: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++                    if D.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 600 < 12 {
++                        log::info!("perf drawnbig o={} {:?} {:?} bg {:?}", q.order, v.origin, v.size, q.background.as_solid());
++                    }
++                }
++            }
++            crate::perf::sample("quadDrawnScreens", a / (1920.0 * 1080.0));
++            crate::perf::sample("nQuadDrawn", n);
++        }
+         Ok(InstanceBindings {
+             quads: self.write_instance_binding(
+                 "quads_bind_group",
+                 instance_offset,
+-                &scene.quads,
++                culled.as_deref().unwrap_or(&scene.quads),
+             )?,
+             shadows: self.write_instance_binding(
+                 "shadows_bind_group",
+@@ -1800,6 +1943,9 @@ impl WgpuRendererCore {
+         if range.is_empty() {
+             return;
+         }
++        if crate::perf::ENABLED {
++            OC_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        }
+         pass.set_pipeline(pipeline);
+         pass.set_bind_group(0, &self.resources().globals_bind_group, &[]);
+         pass.set_bind_group(1, &instances.bind_group, &[]);
+@@ -2603,6 +2749,8 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
+     }
+ }
+ 
++static OC_DRAWS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++
+ fn instance_range(range: Range<usize>) -> Range<u32> {
+     range.start as u32..range.end as u32
+ }

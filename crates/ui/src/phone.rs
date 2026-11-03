@@ -233,7 +233,7 @@ pub fn render(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace
                 .min_h_0()
                 .relative()
                 .child(AnyView::from(w.feed.clone()).cached(StyleRefinement::default().size_full()))
-                .child(probe("feed"))
+                .children(probe("feed"))
                 .on_mouse_down(MouseButton::Left, cx.listener(|w, _, window, cx| w.phone_collapse(window, cx))),
         ),
         Some(s) => col.child(screen_view(w, s, window, cx)),
@@ -247,10 +247,10 @@ pub fn render(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace
                 .bg(k.bg2)
                 .child({
                     let (m, e) = model_effort(w, "pc", cx);
-                    div().flex().items_center().gap(px(2.)).px(px(8.)).pt(px(6.)).child(m).child(e).child(probe("phone.accessory"))
+                    div().flex().items_center().gap(px(2.)).px(px(8.)).pt(px(6.)).child(m).child(e).children(probe("phone.accessory"))
                 })
                 .child(w.composer.clone())
-                .child(probe("phone.composer"))
+                .children(probe("phone.composer"))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
         );
     } else if floating {
@@ -346,7 +346,7 @@ fn header(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) 
                 .cursor_pointer()
                 .child(crate::feed::logo(30., cx).rounded_full())
                 .when(alert || offline, |d| d.child(div().absolute().top(px(-2.)).right(px(-2.)).child(dot(if offline { k.amber } else { k.red }, 9.).border_2().border_color(k.bg))))
-                .child(probe("phone.avatar"))
+                .children(probe("phone.avatar"))
                 .on_click(cx.listener(|w, _, _, cx| w.phone_open(Screen::Panel(View::Workspaces), cx))),
         )
         .child(
@@ -359,8 +359,8 @@ fn header(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) 
                 .items_center()
                 .cursor_pointer()
                 .child(div().flex().items_center().gap(px(4.)).max_w_full().child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title)).child(icon("chevron-down", 12., k.muted)))
-                .child(div().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(if offline { k.amber } else { k.muted }).child(dot(if offline { k.amber } else if working { k.accent } else { k.faint }, 6.)).child(sub).child(probe("phone.subtitle")))
-                .child(probe("phone.title"))
+                .child(div().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(if offline { k.amber } else { k.muted }).child(dot(if offline { k.amber } else if working { k.accent } else { k.faint }, 6.)).child(sub).children(probe("phone.subtitle")))
+                .children(probe("phone.title"))
                 .child(title_pan_area(cx.entity().downgrade()))
                 .on_scroll_wheel(cx.listener(|w, e: &ScrollWheelEvent, window, cx| {
                     // iOS pans (and trackpad swipes) arrive as scroll events: switch once past 40 pt, at the end
@@ -392,7 +392,7 @@ fn header(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) 
                 .text_size(px(15.))
                 .text_color(k.accent)
                 .child(fmt::usd(cost))
-                .child(probe("phone.cost"))
+                .children(probe("phone.cost"))
                 .on_click(cx.listener(|w, _, _, cx| w.phone_open(Screen::Status, cx))),
         )
 }
@@ -421,7 +421,7 @@ fn card(w: &mut Workspace, dr: &str, dict: bool, cx: &mut Context<Workspace>) ->
         .cursor_pointer()
         .child(div().flex().items_center().gap(px(6.)).text_size(px(11.5)).text_color(if dict { k.red } else { k.muted }).when(dict, |d| d.child(pulse("ph-rec", dot(k.red, 7.)))).child(if dict { if s.dict.state == "finishing" { "Finishing…".to_string() } else { "Listening".to_string() } } else { to }))
         .child(div().mt(px(3.)).text_size(px(14.5)).line_height(px(20.)).text_color(k.text).max_h(px(84.)).overflow_hidden().child(if shown.is_empty() { "…".to_string() } else { shown }))
-        .child(probe("phone.card"))
+        .children(probe("phone.card"))
         .on_click(cx.listener(|w, _, window, cx| {
             if !dictating(w, cx) {
                 w.phone_expand(window, cx)
@@ -453,7 +453,7 @@ fn bar(w: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
             .child(icon(ic, 21., col))
             .child(div().text_size(px(10.5)).text_color(col).child(label))
             .when(badge > 0, |d| d.child(div().absolute().top(px(-4.)).left(relative(0.55)).min_w(px(17.)).h(px(17.)).px(px(4.)).rounded_full().bg(k.red).text_color(white()).text_size(px(10.)).font_weight(FontWeight::BOLD).flex().items_center().justify_center().child(badge.to_string())))
-            .child(probe(format!("phone.tab.{}", target.key())))
+            .children(probe(format!("phone.tab.{}", target.key())))
             .on_click(cx.listener(move |w, _, _, cx| w.phone_open(target, cx)))
     };
     let (ic, bg) = if dict { ("x", k.red) } else if send { ("arrow-up", k.accent2) } else { ("message-square", k.accent2) };
@@ -481,7 +481,7 @@ fn bar(w: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                     .cursor_pointer()
                     .shadow(vec![BoxShadow { color: bg.opacity(0.45), offset: point(px(0.), px(4.)), blur_radius: px(16.), spread_radius: px(0.), inset: false }])
                     .child(icon(ic, 23., k.on_accent))
-                    .child(probe("phone.chat"))
+                    .children(probe("phone.chat"))
                     .child(chat_button_events(cx.entity().downgrade())),
             ),
         )
@@ -508,7 +508,7 @@ fn screen_view(w: &mut Workspace, scr: Screen, window: &mut Window, cx: &mut Con
     let s = w.state.read(cx);
     let scope_all = s.prefs.task_scope_all;
     let action: Option<AnyElement> = match scr {
-        Screen::Panel(View::Tasks) => Some(icon_btn("ph-new", "plus", 20., cx).child(probe("phone.new")).on_click(cx.listener(|w, _, window, cx| crate::dialogs::open_new_task(w, None, window, cx))).into_any_element()),
+        Screen::Panel(View::Tasks) => Some(icon_btn("ph-new", "plus", 20., cx).children(probe("phone.new")).on_click(cx.listener(|w, _, window, cx| crate::dialogs::open_new_task(w, None, window, cx))).into_any_element()),
         _ => None,
     };
     let seg = |id: &'static str, label: &'static str, on: bool, val: bool, cx: &mut Context<Workspace>| {
@@ -557,12 +557,12 @@ fn screen_view(w: &mut Workspace, scr: Screen, window: &mut Window, cx: &mut Con
                         .text_color(k.accent)
                         .child(icon("chevron-left", 18., k.accent))
                         .child("Chat")
-                        .child(probe("phone.back"))
+                        .children(probe("phone.back"))
                         .on_click(cx.listener(|w, _, _, cx| w.phone_back(cx))),
                 )
                 .children(action),
         )
-        .child(div().flex_none().px(px(16.)).pt(px(4.)).pb(px(8.)).text_size(px(30.)).font_weight(FontWeight::BOLD).child(scr.title()).child(probe("phone.screenTitle")))
+        .child(div().flex_none().px(px(16.)).pt(px(4.)).pb(px(8.)).text_size(px(30.)).font_weight(FontWeight::BOLD).child(scr.title()).children(probe("phone.screenTitle")))
         .when(scr == Screen::Panel(View::Tasks), |d| {
             d.child(div().flex_none().mx(px(14.)).mb(px(8.)).p(px(3.)).rounded(px(9.)).bg(k.panel).flex().child(seg("ph-all", "All Tasks", scope_all, true, cx)).child(seg("ph-this", "This Task", !scope_all, false, cx)))
         })
@@ -601,7 +601,7 @@ fn more(w: &mut Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let k = c(cx).clone();
     let ws_name = w.state.read(cx).meta.get(&w.state.read(cx).active).map(|m| m.ws.clone()).unwrap_or_default();
     let item = |id: &'static str, ic: &str, tint: Hsla, label: &str, val: String, target: Option<Screen>, cx: &mut Context<Workspace>| {
-        row(id, ic, tint, label, val, true, cx).cursor_pointer().child(probe(format!("phone.more.{}", label.to_lowercase().replace(' ', "")))).on_click(cx.listener(move |w, _, window, cx| match target {
+        row(id, ic, tint, label, val, true, cx).cursor_pointer().children(probe(format!("phone.more.{}", label.to_lowercase().replace(' ', "")))).on_click(cx.listener(move |w, _, window, cx| match target {
             Some(t) => w.phone_open(t, cx),
             None => crate::dialogs::open_new_task(w, None, window, cx),
         }))
@@ -672,7 +672,7 @@ fn status(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) 
         .child(group_title("next turn", cx))
         .child(
             group(cx)
-                .child(row("pst-model", "cpu", k.violet, "Model", String::new(), false, cx).child(model_btn).child(probe("phone.status.model")))
+                .child(row("pst-model", "cpu", k.violet, "Model", String::new(), false, cx).child(model_btn).children(probe("phone.status.model")))
                 .child(row("pst-effort", "sliders-horizontal", k.violet, "Effort", String::new(), false, cx).child(effort_btn)),
         )
         .child(group_title("workspace", cx))

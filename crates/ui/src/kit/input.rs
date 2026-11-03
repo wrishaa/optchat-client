@@ -588,7 +588,7 @@ impl InputState {
             .text_color(white())
             .cursor_pointer()
             .child("Paste")
-            .child(crate::ui::probe("input.paste"))
+            .children(crate::ui::probe("input.paste"))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|s, _, _, cx| {
                 s.paste_at = None;

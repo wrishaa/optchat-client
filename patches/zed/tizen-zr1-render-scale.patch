@@ -1,0 +1,266 @@
+diff --git a/crates/gpui_linux/protocols/wl-scaler.xml b/crates/gpui_linux/protocols/wl-scaler.xml
+new file mode 100644
+index 0000000..54bb019
+--- /dev/null
++++ b/crates/gpui_linux/protocols/wl-scaler.xml
+@@ -0,0 +1,38 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="scaler">
++  <!-- weston/tizen wl_scaler v2 (the pre-stable form of wp_viewporter); the tizen tv compositor offers wl_scaler@2 -->
++  <interface name="wl_scaler" version="2">
++    <request name="destroy" type="destructor"/>
++    <enum name="error">
++      <entry name="viewport_exists" value="0"/>
++    </enum>
++    <request name="get_viewport">
++      <arg name="id" type="new_id" interface="wl_viewport"/>
++      <arg name="surface" type="object" interface="wl_surface"/>
++    </request>
++  </interface>
++  <interface name="wl_viewport" version="2">
++    <request name="destroy" type="destructor"/>
++    <enum name="error">
++      <entry name="bad_value" value="0"/>
++    </enum>
++    <request name="set">
++      <arg name="src_x" type="fixed"/>
++      <arg name="src_y" type="fixed"/>
++      <arg name="src_width" type="fixed"/>
++      <arg name="src_height" type="fixed"/>
++      <arg name="dst_width" type="int"/>
++      <arg name="dst_height" type="int"/>
++    </request>
++    <request name="set_source" since="2">
++      <arg name="x" type="fixed"/>
++      <arg name="y" type="fixed"/>
++      <arg name="width" type="fixed"/>
++      <arg name="height" type="fixed"/>
++    </request>
++    <request name="set_destination" since="2">
++      <arg name="width" type="int"/>
++      <arg name="height" type="int"/>
++    </request>
++  </interface>
++</protocol>
+diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/src/linux/wayland/client.rs
+index 87de876..49e9e70 100644
+--- a/crates/gpui_linux/src/linux/wayland/client.rs
++++ b/crates/gpui_linux/src/linux/wayland/client.rs
+@@ -260,6 +260,10 @@ pub struct Globals {
+     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
+     #[cfg(feature = "tizen")]
+     pub keyrouter: Option<super::xdg_compat::keyrouter::tizen_keyrouter::TizenKeyrouter>,
++    #[cfg(feature = "tizen")]
++    pub scaler: Option<super::xdg_compat::scaler::wl_scaler::WlScaler>,
++    #[cfg(feature = "tizen")]
++    pub presentation: Option<wayland_protocols::wp::presentation_time::client::wp_presentation::WpPresentation>,
+     pub executor: ForegroundExecutor,
+     pub frame_ping: Ping,
+ }
+@@ -315,6 +319,10 @@ impl Globals {
+                 globals.contents().with_list(|l| log::info!("tizen wl globals: {}", l.iter().map(|g| format!("{}@{}", g.interface, g.version)).collect::<Vec<_>>().join(" ")));
+                 globals.bind(&qh, 1..=1, ()).map_err(|e| log::info!("tizen keyrouter bind failed: {e}")).ok()
+             },
++            #[cfg(feature = "tizen")]
++            scaler: globals.bind(&qh, 2..=2, ()).map_err(|e| log::info!("tizen wl_scaler bind failed: {e}")).ok(),
++            #[cfg(feature = "tizen")]
++            presentation: globals.bind(&qh, 1..=1, ()).map_err(|e| log::info!("tizen wp_presentation bind failed: {e}")).ok(),
+             executor,
+             qh,
+             frame_ping,
+@@ -1669,6 +1677,10 @@ delegate_noop!(WaylandClientStatePtr: ignore wp_cursor_shape_manager_v1::WpCurso
+ delegate_noop!(WaylandClientStatePtr: ignore wl_data_device_manager::WlDataDeviceManager);
+ delegate_noop!(WaylandClientStatePtr: ignore zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1);
+ delegate_noop!(WaylandClientStatePtr: ignore wl_shm::WlShm);
++#[cfg(feature = "tizen")]
++delegate_noop!(WaylandClientStatePtr: ignore super::xdg_compat::scaler::wl_scaler::WlScaler);
++#[cfg(feature = "tizen")]
++delegate_noop!(WaylandClientStatePtr: ignore super::xdg_compat::scaler::wl_viewport::WlViewport);
+ delegate_noop!(WaylandClientStatePtr: ignore wl_shm_pool::WlShmPool);
+ delegate_noop!(WaylandClientStatePtr: ignore wl_buffer::WlBuffer);
+ delegate_noop!(WaylandClientStatePtr: ignore wl_region::WlRegion);
+@@ -1804,6 +1816,8 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
+                 height,
+                 refresh,
+             } => {
++                #[cfg(feature = "tizen")]
++                log::info!("tizen wl_output mode {width}x{height} refresh_mhz={refresh} flags={flags:?}");
+                 // Compositors before wl_output v4 may also list modes the
+                 // output isn't using.
+                 if let WEnum::Value(flags) = flags
+@@ -1945,6 +1959,59 @@ impl Dispatch<super::xdg_compat::keyrouter::tizen_keyrouter::TizenKeyrouter, ()>
+ 
+ /// keys the tizen tv shell keeps unless the app grabs them (remote mic buttons). override with OC_TIZEN_GRAB="a,b".
+ #[cfg(feature = "tizen")]
++#[cfg(feature = "tizen")]
++mod tizen_pres {
++    pub use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
++    pub static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++    pub static LAST: std::sync::Mutex<(u64, u64, u32, u32, u64, u64)> = std::sync::Mutex::new((0, 0, 0, 0, 0, u64::MAX));
++}
++
++#[cfg(feature = "tizen")]
++impl Dispatch<tizen_pres::wp_presentation::WpPresentation, ()> for WaylandClientStatePtr {
++    fn event(_: &mut Self, _: &tizen_pres::wp_presentation::WpPresentation, event: tizen_pres::wp_presentation::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
++        if let tizen_pres::wp_presentation::Event::ClockId { clk_id } = event {
++            log::info!("tizen wp_presentation clock_id={clk_id}");
++        }
++    }
++}
++
++#[cfg(feature = "tizen")]
++impl Dispatch<tizen_pres::wp_presentation_feedback::WpPresentationFeedback, ()> for WaylandClientStatePtr {
++    fn event(_: &mut Self, _: &tizen_pres::wp_presentation_feedback::WpPresentationFeedback, event: tizen_pres::wp_presentation_feedback::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
++        use tizen_pres::wp_presentation_feedback::Event;
++        // (last_t_ns, last_seq, presented, discarded, sum_interval_ns, min_refresh)
++        let mut l = tizen_pres::LAST.lock().unwrap();
++        match event {
++            Event::Presented { tv_sec_hi, tv_sec_lo, tv_nsec, refresh, seq_hi, seq_lo, flags } => {
++                let t = (((tv_sec_hi as u64) << 32 | tv_sec_lo as u64) * 1_000_000_000) + tv_nsec as u64;
++                let seq = (seq_hi as u64) << 32 | seq_lo as u64;
++                let (dt, dseq) = if l.0 != 0 { (t.saturating_sub(l.0), seq.wrapping_sub(l.1)) } else { (0, 0) };
++                l.2 += 1;
++                let n = l.2;
++                if n <= 40 || n % 120 == 0 {
++                    log::info!("tizen present #{n} refresh_ns={refresh} dt_us={} dseq={dseq} seq={seq} flags={flags:?} discarded={}", dt / 1000, l.3);
++                }
++                l.0 = t;
++                l.1 = seq;
++            }
++            Event::Discarded => {
++                l.3 += 1;
++            }
++            Event::SyncOutput { .. } => {}
++            _ => {}
++        }
++    }
++}
++
++#[cfg(feature = "tizen")]
++pub(crate) fn tizen_request_presentation(globals: &Globals, surface: &wl_surface::WlSurface) {
++    if let Some(p) = globals.presentation.as_ref() {
++        if tizen_pres::N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 100_000 {
++            p.feedback(surface, &globals.qh, ());
++        }
++    }
++}
++
+ fn tizen_grab_keys(state: &WaylandClientState, surface: &wl_surface::WlSurface) {
+     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+     let (Some(kr), Some(ks)) = (state.globals.keyrouter.as_ref(), state.keymap_state.as_ref()) else { return };
+diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
+index 3f0e5f3..a80a4dd 100644
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -110,6 +110,8 @@ pub struct WaylandWindowState {
+     appearance: WindowAppearance,
+     blur: Option<org_kde_kwin_blur::OrgKdeKwinBlur>,
+     viewport: Option<wp_viewport::WpViewport>,
++    #[cfg(feature = "tizen")]
++    tz_viewport: Option<super::xdg_compat::scaler::wl_viewport::WlViewport>,
+     outputs: HashMap<ObjectId, Output>,
+     display: Option<(ObjectId, Output)>,
+     globals: Globals,
+@@ -583,6 +585,12 @@ impl WaylandWindowState {
+         options: WindowParams,
+         parent: Option<WaylandWindowStatePtr>,
+     ) -> anyhow::Result<Self> {
++        #[cfg(feature = "tizen")]
++        let tz_viewport = (tizen_render() < 1.0)
++            .then(|| globals.scaler.as_ref().map(|s| s.get_viewport(&surface, &globals.qh, ())))
++            .flatten();
++        #[cfg(feature = "tizen")]
++        log::info!("tizen render scale {} (ui {}), wl_viewport {}", tizen_render(), tizen_ui_scale(), tz_viewport.is_some());
+         #[cfg(feature = "tizen")]
+         let initial_scale = tizen_scale();
+         #[cfg(not(feature = "tizen"))]
+@@ -635,6 +643,8 @@ impl WaylandWindowState {
+             app_id: options.app_id,
+             blur: None,
+             viewport,
++            #[cfg(feature = "tizen")]
++            tz_viewport,
+             globals,
+             outputs: HashMap::default(),
+             display: None,
+@@ -1038,6 +1048,11 @@ impl WaylandWindowStatePtr {
+         // Another wl_surface commit may have carried this callback while a retry
+         // timer owned the render-loop wakeup.
+         self.state.borrow_mut().pending_frame_callback = None;
++        #[cfg(feature = "tizen")]
++        {
++            let st = self.state.borrow();
++            super::client::tizen_request_presentation(&st.globals, &st.surface);
++        }
+         if self.frame_loop.get() == FrameLoop::AwaitingCallback {
+             self.frame(signal_at, FrameRequestSource::NativeCallback);
+         }
+@@ -1170,8 +1185,8 @@ impl WaylandWindowStatePtr {
+                         #[cfg(feature = "tizen")]
+                         {
+                             // surface pixels -> the ui's logical size at the tv's one scale
+-                            let k = tizen_scale();
+-                            self.set_size_and_scale(Some(gpui::size(gpui::px(f32::from(size.width) / k), gpui::px(f32::from(size.height) / k))), Some(k));
++                            let k = tizen_ui_scale();
++                            self.set_size_and_scale(Some(gpui::size(gpui::px(f32::from(size.width) / k), gpui::px(f32::from(size.height) / k))), Some(tizen_scale()));
+                         }
+                         #[cfg(not(feature = "tizen"))]
+                         self.resize(size);
+@@ -1581,6 +1596,12 @@ impl WaylandWindowStatePtr {
+                 viewport
+                     .set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
+             }
++            // render at ui*render scale, show at the surface size (logical * ui scale)
++            #[cfg(feature = "tizen")]
++            if let Some(vp) = &state.tz_viewport {
++                let k = tizen_ui_scale();
++                vp.set_destination((f32::from(size.width) * k).round() as i32, (f32::from(size.height) * k).round() as i32);
++            }
+         }
+     }
+ 
+@@ -2471,7 +2492,21 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
+ /// wp_viewporter nor fractional scale, so the ui lays out at the surface size / scale and draws the full-size buffer
+ /// at buffer scale 1 (a 1920×1080 surface at 1.5 is a 1280×720 ui, sharp).
+ #[cfg(feature = "tizen")]
+-pub(crate) fn tizen_scale() -> f32 {
++pub(crate) fn tizen_ui_scale() -> f32 {
+     static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+     *S.get_or_init(|| std::env::var("GPUI_TIZEN_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| (1.0..=4.0).contains(v)).unwrap_or(1.0))
+ }
++
++/// GPUI_TIZEN_RENDER (0.25..=1): render into a buffer this fraction of the surface and let the compositor scale it
++/// up through tizen's wl_scaler (gpu fill on the tv's Mali-G31 scales with buffer pixels). 1 = native.
++#[cfg(feature = "tizen")]
++pub(crate) fn tizen_render() -> f32 {
++    static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
++    *S.get_or_init(|| std::env::var("GPUI_TIZEN_RENDER").ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| (0.25..=1.0).contains(v)).unwrap_or(1.0))
++}
++
++/// the scale gpui draws at: device pixels per logical pixel (ui scale times render scale)
++#[cfg(feature = "tizen")]
++pub(crate) fn tizen_scale() -> f32 {
++    tizen_ui_scale() * tizen_render()
++}
+diff --git a/crates/gpui_linux/src/linux/wayland/xdg_compat.rs b/crates/gpui_linux/src/linux/wayland/xdg_compat.rs
+index 2c39033..ed645a8 100644
+--- a/crates/gpui_linux/src/linux/wayland/xdg_compat.rs
++++ b/crates/gpui_linux/src/linux/wayland/xdg_compat.rs
+@@ -42,3 +42,17 @@ pub mod keyrouter {
+     use self::__interfaces::*;
+     wayland_scanner::generate_client_code!("protocols/tizen-keyrouter.xml");
+ }
++
++/// tizen's wl_scaler@2 (pre-stable wp_viewporter): lets the ui render into a smaller buffer that the compositor
++/// scales to the full surface (GPUI_TIZEN_RENDER < 1).
++#[cfg(feature = "tizen")]
++pub mod scaler {
++    use wayland_client;
++    use wayland_client::protocol::*;
++    pub mod __interfaces {
++        use wayland_client::protocol::__interfaces::*;
++        wayland_scanner::generate_interfaces!("protocols/wl-scaler.xml");
++    }
++    use self::__interfaces::*;
++    wayland_scanner::generate_client_code!("protocols/wl-scaler.xml");
++}

@@ -11,6 +11,10 @@ export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$TZ_ROOT
 export PKG_CONFIG_LIBDIR=$TZ_ROOT/usr/lib/pkgconfig
 # link stub for libxkbcommon (not in the rootstrap; the real one is on the tv), built by build.sh
 STUBS=$(pwd)/target/tizen-stubs
-export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_RUSTFLAGS="-L $STUBS -C link-arg=-Wl,--allow-shlib-undefined"
+# the armv7-unknown-linux-gnueabi target defaults to +soft-float: every f32 op is an __aeabi_* libcall. the tv cpu is a
+# cortex-a72 (vfpv4, neon, d32), so turn the fpu on. float-abi stays soft (softfp: vfp inside, floats passed in core
+# registers), so this links with the prebuilt soft-float std and the tv's C libs unchanged. (rustc warns: unstable features)
+OC_FPU="-C target-cpu=cortex-a72 -C target-feature=+vfp4,+neon,+d32,-soft-float"
+export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_RUSTFLAGS="-L $STUBS -C link-arg=-Wl,--allow-shlib-undefined $OC_FPU"
 export RUST_FONTCONFIG_DLOPEN=1
 export OPENSSL_LIB_DIR=$TZ_ROOT/usr/lib OPENSSL_INCLUDE_DIR=$TZ_ROOT/usr/include

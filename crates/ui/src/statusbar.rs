@@ -61,12 +61,12 @@ pub fn render(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspac
                 .hover(move |s| s.bg(hover))
                 .child(icon("layers", 13., fg))
                 .child(m.ws.clone())
-                .child(probe("status.ws"))
+                .children(probe("status.ws"))
                 .tooltip(tooltip(format!("workspace {} on {engine} (click to switch)", m.ws)))
                 .on_click(cx.listener(|w, _, _, cx| crate::workspaces::open_panel(w, cx))),
         );
     }
-    left = left.child(item().child(sdot).child(status.clone()).child(probe("status.text")));
+    left = left.child(item().child(sdot).child(status.clone()).children(probe("status.text")));
     if let Some(t) = &t {
         if t.parent.is_some() && !narrow {
             left = left.child(item().child(icon("git-fork", 13., fg)).child(format!("#{} {}", t.id, t.mode.as_str())));
@@ -86,13 +86,13 @@ pub fn render(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspac
     {
         let u = s.unread();
         let hover = k.hover.opacity(0.5);
-        let mut n = item().id("sb-notices").cursor_pointer().hover(move |s| s.bg(hover)).gap(px(7.)).child(probe("status.notices"));
+        let mut n = item().id("sb-notices").cursor_pointer().hover(move |s| s.bg(hover)).gap(px(7.)).children(probe("status.notices"));
         let mut any = false;
         clear_probes("status.notice.");
         for (lv, cnt, col) in [("error", u.error, k.red), ("warn", u.warn, k.amber), ("info", u.info, k.muted), ("ok", u.ok, k.green)] {
             if cnt > 0 {
                 any = true;
-                n = n.child(div().flex().items_center().gap(px(3.)).child(dot(col, 7.)).child(cnt.to_string()).child(probe(format!("status.notice.{lv}"))));
+                n = n.child(div().flex().items_center().gap(px(3.)).child(dot(col, 7.)).child(cnt.to_string()).children(probe(format!("status.notice.{lv}"))));
             }
         }
         if !any {
@@ -120,11 +120,11 @@ pub fn render(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspac
         let cost = sub(info.as_ref(), "usd") as f64 / 1e6;
         let pct = t.budget.usd.map(|b| (100.0 * cost / b).min(100.0));
         let hover = k.hover.opacity(0.5);
-        let mut costi = item().id("sb-cost").cursor_pointer().hover(move |s| s.bg(hover)).child(icon("coins", 13., fg)).child(fmt::usd(cost)).child(probe("status.cost"));
+        let mut costi = item().id("sb-cost").cursor_pointer().hover(move |s| s.bg(hover)).child(icon("coins", 13., fg)).child(fmt::usd(cost)).children(probe("status.cost"));
         if let Some(b) = t.budget.usd {
             let p = pct.unwrap_or(0.0);
             let col = if p >= 100.0 { k.red } else if p > 80.0 { k.amber } else { k.accent };
-            costi = costi.child(format!("/ {}", fmt::usd(b))).child(div().w(px(40.)).h(px(4.)).rounded(px(2.)).bg(k.line2).child(div().h_full().rounded(px(2.)).w(px(40. * p as f32 / 100.)).bg(col)).child(probe("status.budgetbar")));
+            costi = costi.child(format!("/ {}", fmt::usd(b))).child(div().w(px(40.)).h(px(4.)).rounded(px(2.)).bg(k.line2).child(div().h_full().rounded(px(2.)).w(px(40. * p as f32 / 100.)).bg(col)).children(probe("status.budgetbar")));
         }
         right = right.child(costi.tooltip(tooltip(format!("cost of this task and its subtree (own {}), API-equivalent. Click for all metrics and the budget.", fmt::usd(own(info.as_ref(), "usd") as f64 / 1e6)))).on_click(cx.listener(|w, _, window, cx| dialogs::open_metrics(w, window, cx))));
         let at = sub(info.as_ref(), "time.active");
@@ -160,7 +160,7 @@ pub fn render(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspac
                 let st2 = w.state.clone();
                 let cur_model = set.model.clone();
                 right = right.child(
-                    div().h_full().flex().items_center().child(probe("status.model")).child(
+                    div().h_full().flex().items_center().children(probe("status.model")).child(
                         Button::new("sb-model")
                             .ghost()
                             .xsmall()
@@ -186,7 +186,7 @@ pub fn render(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspac
                 let efforts = s.model(&set.model).map(|m| m.efforts.clone()).unwrap_or_default();
                 let cur_e = set.effort.clone();
                 right = right.child(
-                    div().h_full().flex().items_center().child(probe("status.effort")).child(Button::new("sb-effort").ghost().xsmall().label(set.effort.clone()).dropdown_caret(true).dropdown_menu(move |mut m, _, _| {
+                    div().h_full().flex().items_center().children(probe("status.effort")).child(Button::new("sb-effort").ghost().xsmall().label(set.effort.clone()).dropdown_caret(true).dropdown_menu(move |mut m, _, _| {
                         for e in &efforts {
                             let st = st2.clone();
                             let ev = e.clone();
@@ -214,5 +214,5 @@ pub fn render(w: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspac
         .text_color(fg)
         .child(left)
         .child(right)
-        .child(probe("statusbar"))
+        .children(probe("statusbar"))
 }

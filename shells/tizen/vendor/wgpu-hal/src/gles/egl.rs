@@ -1146,6 +1146,16 @@ impl Surface {
 
         unsafe { gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None) };
         unsafe { gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(sc.framebuffer)) };
+        if super::oc_readback::WANT.swap(false, core::sync::atomic::Ordering::SeqCst) {
+            if let Some(sink) = super::oc_readback::SINK.get() {
+                let (w, h) = (sc.extent.width, sc.extent.height);
+                let mut px = alloc::vec![0u8; (w * h * 4) as usize];
+                unsafe {
+                    gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut px)))
+                };
+                sink(w, h, px);
+            }
+        }
 
         if !matches!(self.srgb_kind, SrgbFrameBufferKind::None) {
             // Disable sRGB conversions for `glBlitFramebuffer` as behavior does diverge between
@@ -1392,6 +1402,7 @@ impl crate::Surface for Surface {
             log::error!("Internal swapchain renderbuffer creation failed: {error}");
             crate::DeviceError::OutOfMemory
         })?;
+        super::oc_damage::SURFACE_RB.store(renderbuffer.0.get(), core::sync::atomic::Ordering::SeqCst);
         unsafe { gl.bind_renderbuffer(glow::RENDERBUFFER, Some(renderbuffer)) };
         unsafe {
             gl.renderbuffer_storage(

@@ -222,7 +222,7 @@ impl MemoryPanel {
                 .when(open, |d| d.bg(k.panel))
                 .hover(move |s| s.bg(hover))
                 .tooltip(tooltip(if l == 0 { "open the message".to_string() } else { format!("zoom: open into two lines of {}", n / 2) }))
-                .child(probe(format!("mem.{kk}")))
+                .children(probe(format!("mem.{kk}")))
                 .child(div().mt(px(3.)).child(chevron(format!("mem{kk}"), 10., k.faint, open)))
                 .child(div().w(px(3.)).h(px(14.)).mt(px(1.)).rounded(px(2.)).flex_none().bg(k.levels[l as usize % 8]))
                 .child(
@@ -351,14 +351,14 @@ impl MemoryPanel {
                     .text_size(px(11.5))
                     .cursor_pointer()
                     .child(spinner(SharedString::from(format!("js{b}")), 11., k.accent))
-                    .child(probe(format!("job.{b}")))
+                    .children(probe(format!("job.{b}")))
                     .child(if l == 0 { format!("message {i}") } else { format!("{}+{}", i << l, 1i64 << l) })
                     .when(t != task, |d| d.child(div().text_color(k.violet).child(format!("@{t}"))))
                     .on_click(cx.listener(move |m, _, _, cx| m.reveal(t, i << l, cx))),
             );
         }
         for (b, e) in &failed {
-            jobs = jobs.child(chip(format!("{b} failed · retrying"), ChipTone::Red, cx).id(SharedString::from(format!("jf{b}"))).child(probe(format!("jobf.{b}"))).tooltip(tooltip(e.clone())));
+            jobs = jobs.child(chip(format!("{b} failed · retrying"), ChipTone::Red, cx).id(SharedString::from(format!("jf{b}"))).children(probe(format!("jobf.{b}"))).tooltip(tooltip(e.clone())));
         }
         let mut hits_el = div().flex().flex_col();
         if let Some(h) = &self.hits {
@@ -378,7 +378,7 @@ impl MemoryPanel {
                         .text_size(px(12.))
                         .cursor_pointer()
                         .hover(|s| s.bg(k.hover))
-                        .child(probe(format!("hit.{t}.{i}")))
+                        .children(probe(format!("hit.{t}.{i}")))
                         .child(div().flex_none().font_family(crate::ui::MONO).text_color(k.muted).child(format!("{i}{}", if t != task { format!("@{t}") } else { String::new() })))
                         .child(div().flex_none().px(px(4.)).rounded(px(3.)).bg(k.panel2).text_size(px(10.5)).text_color(k.muted).child(x.kind.clone()))
                         .child(div().flex_1().min_w_0().overflow_hidden().line_clamp(1).text_ellipsis().text_color(k.text2).child(x.text.replace('\n', " ").chars().take(160).collect::<String>()))
@@ -400,10 +400,10 @@ impl MemoryPanel {
         }
         let which_c = self.which_c;
         pad(div())
-            .child(probe("memory"))
+            .children(probe("memory"))
             .child(section(cx).child(section_title(format!("memory of {}", if task == 0 { "the main chat".to_string() } else { format!("#{task}") }), cx)).child(summary))
             .child(section(cx).child(section_title(format!("compaction jobs · {}{}", if busy_all.is_empty() { "idle".to_string() } else { format!("{} running", busy_all.len()) }, if other > 0 { format!(" · {other} in other tasks") } else { String::new() }), cx)).child(jobs))
-            .child(section(cx).child(div().flex().gap(px(6.)).child(div().flex_1().child(Input::new(&self.search).small()).child(probe("mem.search"))).child(btn_small("msearch", "Search", Tone::Plain, cx).on_click(cx.listener(|m, _, _, cx| m.do_search(cx))))).child(div().mt(px(6.)).child(hits_el)))
+            .child(section(cx).child(div().flex().gap(px(6.)).child(div().flex_1().child(Input::new(&self.search).small()).children(probe("mem.search"))).child(btn_small("msearch", "Search", Tone::Plain, cx).on_click(cx.listener(|m, _, _, cx| m.do_search(cx))))).child(div().mt(px(6.)).child(hits_el)))
             .child(
                 section(cx)
                     .child(
@@ -412,15 +412,15 @@ impl MemoryPanel {
                             .items_center()
                             .gap(px(4.))
                             .mb(px(8.))
-                            .child(seg("seg-view", "the view", !which_c, cx).child(probe("mem.view")).on_click(cx.listener(|m, _, _, cx| { m.which_c = false; cx.notify(); })))
-                            .child(seg("seg-cview", "compactions' view", which_c, cx).child(probe("mem.cview")).on_click(cx.listener(|m, _, _, cx| {
+                            .child(seg("seg-view", "the view", !which_c, cx).children(probe("mem.view")).on_click(cx.listener(|m, _, _, cx| { m.which_c = false; cx.notify(); })))
+                            .child(seg("seg-cview", "compactions' view", which_c, cx).children(probe("mem.cview")).on_click(cx.listener(|m, _, _, cx| {
                                 m.which_c = true;
                                 let id = m.state.read(cx).current;
                                 fetch(&m.state, cx, move |h| async move { h.cview_parts(id).await }, |m, cv, _| m.cview = cv);
                                 cx.notify();
                             })))
                             .child(div().flex_1())
-                            .child(btn_small("mraw", if self.rendered.is_some() { "hide raw" } else { "raw" }, Tone::Ghost, cx).child(probe("mem.raw")).on_click(cx.listener(|m, _, _, cx| {
+                            .child(btn_small("mraw", if self.rendered.is_some() { "hide raw" } else { "raw" }, Tone::Ghost, cx).children(probe("mem.raw")).on_click(cx.listener(|m, _, _, cx| {
                                 if m.rendered.is_some() {
                                     m.rendered = None;
                                     cx.notify();
@@ -521,7 +521,7 @@ impl ContextPanel {
                     .child(div().flex_none().w(px(70.)).text_color(k.muted).text_size(px(11.)).child(kind))
                     .child(div().flex_1().min_w_0().overflow_hidden().line_clamp(1).text_ellipsis().text_color(k.text2).child(prev))
                     .child(div().flex_none().text_size(px(10.5)).text_color(k.faint).child(format!("{}{}", fmt::bytes(m.bytes as usize), if m.raw.is_some() { " · raw" } else { "" })))
-                    .when(is_img, |d| d.child(probe(format!("cmimg.{}", m.id))))
+                    .when(is_img, |d| d.children(probe(format!("cmimg.{}", m.id))))
                     .on_click(cx.listener(move |p, _, _, cx| {
                         if !p.open.remove(&id) {
                             p.open.insert(id.clone());
@@ -534,7 +534,7 @@ impl ContextPanel {
                     Body::Image { blob: Some(b), .. } => Some(crate::ui::blob_thumb(&self.state, b, 260., 200., None, cx)),
                     _ => None,
                 };
-                d.child(div().ml(px(18.)).mb(px(6.)).p(px(8.)).rounded(px(6.)).bg(k.code_bg).font_family(crate::ui::MONO).text_size(px(11.5)).line_height(px(17.)).text_color(k.text2).child(full).when_some(image, |d, i| d.child(div().mt(px(6.)).child(i).child(probe("ctx.thumb")))))
+                d.child(div().ml(px(18.)).mb(px(6.)).p(px(8.)).rounded(px(6.)).bg(k.code_bg).font_family(crate::ui::MONO).text_size(px(11.5)).line_height(px(17.)).text_color(k.text2).child(full).when_some(image, |d, i| d.child(div().mt(px(6.)).child(i).children(probe("ctx.thumb")))))
             })
             .into_any_element()
     }
@@ -679,13 +679,13 @@ impl ContextPanel {
         }
         let wire_txt = d.wire.as_ref().map(|w| serde_json::to_string_pretty(w).unwrap_or_default());
         pad(div())
-            .child(probe("context"))
+            .children(probe("context"))
             .child(section(cx).child(section_title(format!("{} {}", if r.purpose == "compact" { "compactor call" } else { "model call" }, &r.id[..8.min(r.id.len())]), cx)).child(summary))
             .child(section(cx).child(section_title("context sent (canonical, oldest first)", cx)).child(ctx))
             .child(section(cx).child(section_title("output", cx)).child(out))
             .child(
                 section(cx)
-                    .child(div().flex().items_center().gap(px(8.)).child(section_title("wire request", cx)).child(btn_small("wire", if self.wire { "hide" } else { "show" }, Tone::Ghost, cx).child(probe("ctx.wire")).on_click(cx.listener(|p, _, _, cx| { p.wire = !p.wire; cx.notify(); }))))
+                    .child(div().flex().items_center().gap(px(8.)).child(section_title("wire request", cx)).child(btn_small("wire", if self.wire { "hide" } else { "show" }, Tone::Ghost, cx).children(probe("ctx.wire")).on_click(cx.listener(|p, _, _, cx| { p.wire = !p.wire; cx.notify(); }))))
                     .child(if self.wire {
                         match wire_txt {
                             Some(w) => div().p(px(8.)).rounded(px(6.)).bg(k.code_bg).font_family(crate::ui::MONO).text_size(px(11.)).text_color(k.text2).child(w.chars().take(200_000).collect::<String>()),
@@ -830,7 +830,7 @@ impl LogPanel {
                     .child(div().w(px(40.)).flex().justify_end().child(format!("{}%", fmt::cache_pct(r.usage.as_ref()))))
                     .child(div().w(px(44.)).flex().justify_end().child(fmt::tokens(r.usage.as_ref().map(|u| u.output).unwrap_or(0))))
                     .child(div().w(px(58.)).flex().justify_end().child(fmt::cost(r.cost.as_ref())))
-                    .when(n < 5, |d| d.child(probe(format!("logrow.{n}"))))
+                    .when(n < 5, |d| d.children(probe(format!("logrow.{n}"))))
                     .on_click(move |_, _, cx| {
                         let rid = rid.clone();
                         st.update(cx, |s, cx| {
@@ -846,14 +846,14 @@ impl LogPanel {
         let filters = ["all", "chat", "compact"];
         let mut fl = div().flex().gap(px(4.)).mb(px(8.));
         for f in filters {
-            fl = fl.child(seg(format!("lf{f}"), f, self.filter == f, cx).child(probe(format!("log.f.{f}"))).on_click(cx.listener(move |p, _, _, cx| {
+            fl = fl.child(seg(format!("lf{f}"), f, self.filter == f, cx).children(probe(format!("log.f.{f}"))).on_click(cx.listener(move |p, _, _, cx| {
                 p.filter = f;
                 cx.notify();
             })));
         }
         pad(div())
-            .child(probe("log"))
-            .child(div().flex().gap(px(4.)).mb(px(10.)).child(seg("ls-task", "this task", !self.subtree, cx).on_click(cx.listener(|p, _, _, cx| { p.subtree = false; cx.notify(); }))).child(seg("ls-sub", "with its subtree", self.subtree, cx).child(probe("log.subtree")).on_click(cx.listener(|p, _, _, cx| { p.subtree = true; cx.notify(); }))))
+            .children(probe("log"))
+            .child(div().flex().gap(px(4.)).mb(px(10.)).child(seg("ls-task", "this task", !self.subtree, cx).on_click(cx.listener(|p, _, _, cx| { p.subtree = false; cx.notify(); }))).child(seg("ls-sub", "with its subtree", self.subtree, cx).children(probe("log.subtree")).on_click(cx.listener(|p, _, _, cx| { p.subtree = true; cx.notify(); }))))
             .child(section(cx).child(bd_el))
             .child(section(cx).child(totals))
             .child(fl)
@@ -961,15 +961,15 @@ impl ModelsPanel {
             hist.sort();
             crate::ui::set_state_extra("models", serde_json::json!({ "providers": providers, "runnable": runnable, "hidden": hidden, "showHidden": self.show_hidden, "shown": shown, "haiku": haiku, "hist": hist, "reloads": self.reloads, "histCounts": rows.iter().filter(|r| r.history.len() > 1).map(|r| (r.cat.id.clone(), r.history.len())).collect::<std::collections::BTreeMap<_, _>>() }));
         }
-        let mut out = pad(div()).child(probe("models")).child(
+        let mut out = pad(div()).children(probe("models")).child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .mb(px(10.))
                 .child(div().flex_1().min_w_0().overflow_hidden().line_clamp(1).text_ellipsis().text_size(px(12.)).text_color(k.muted).child(format!("{runnable} models you can run · prices per 1M tokens")))
-                .when(hidden > 0, |d| d.child(btn_small("showhidden", format!("{} {hidden} hidden", if self.show_hidden { "hide" } else { "show" }), Tone::Ghost, cx).flex_none().child(probe("models.showhidden")).on_click(cx.listener(|p, _, _, cx| { p.show_hidden = !p.show_hidden; cx.notify(); }))))
-                .child(icon_btn("mrefresh", "refresh-cw", 14., cx).child(probe("models.refresh")).tooltip(tooltip("read the providers' model lists again")).on_click(cx.listener(|p, _, _, cx| {
+                .when(hidden > 0, |d| d.child(btn_small("showhidden", format!("{} {hidden} hidden", if self.show_hidden { "hide" } else { "show" }), Tone::Ghost, cx).flex_none().children(probe("models.showhidden")).on_click(cx.listener(|p, _, _, cx| { p.show_hidden = !p.show_hidden; cx.notify(); }))))
+                .child(icon_btn("mrefresh", "refresh-cw", 14., cx).children(probe("models.refresh")).tooltip(tooltip("read the providers' model lists again")).on_click(cx.listener(|p, _, _, cx| {
                     fetch(&p.state, cx, |h| async move { let _ = h.refresh_catalog().await; }, |p, _, cx| p.reload(cx));
                 }))),
         );
@@ -1013,7 +1013,7 @@ impl ModelsPanel {
         let mut cardv = card(cx)
             .mb(px(8.))
             .when(hidden, |d| d.opacity(0.6))
-            .child(probe(format!("model.{id}")))
+            .children(probe(format!("model.{id}")))
             .child(
                 div()
                     .flex()
@@ -1054,7 +1054,7 @@ impl ModelsPanel {
                 .mt(px(8.))
                 .text_size(px(12.))
                 .text_color(k.accent)
-                .child(div().id(SharedString::from(format!("edit{id}"))).cursor_pointer().child(if editing { "cancel" } else if p.is_some() { "edit rate" } else { "set a rate" }).child(probe(format!("model.edit.{id}"))).on_click(cx.listener(move |m, _, window, cx| {
+                .child(div().id(SharedString::from(format!("edit{id}"))).cursor_pointer().child(if editing { "cancel" } else if p.is_some() { "edit rate" } else { "set a rate" }).children(probe(format!("model.edit.{id}"))).on_click(cx.listener(move |m, _, window, cx| {
                     if m.edit.as_ref().map(|e| e.0 == r2.cat.id).unwrap_or(false) {
                         m.edit = None;
                         cx.notify();
@@ -1062,13 +1062,13 @@ impl ModelsPanel {
                         m.start_edit(&r2, window, cx);
                     }
                 })))
-                .when(r.history.len() > 1, |d| d.child(div().id(SharedString::from(format!("hist{id}"))).cursor_pointer().child(format!("history ({})", r.history.len())).child(probe(format!("model.hist.{id}"))).on_click(cx.listener(move |m, _, _, cx| {
+                .when(r.history.len() > 1, |d| d.child(div().id(SharedString::from(format!("hist{id}"))).cursor_pointer().child(format!("history ({})", r.history.len())).children(probe(format!("model.hist.{id}"))).on_click(cx.listener(move |m, _, _, cx| {
                     if !m.hist.remove(&id2) {
                         m.hist.insert(id2.clone());
                     }
                     cx.notify();
                 }))))
-                .child(div().id(SharedString::from(format!("hide{id}"))).cursor_pointer().child(if hidden { "show in pickers" } else { "hide from pickers" }).child(probe(format!("model.hide.{id}"))).on_click(move |_, _, cx| {
+                .child(div().id(SharedString::from(format!("hide{id}"))).cursor_pointer().child(if hidden { "show in pickers" } else { "hide from pickers" }).children(probe(format!("model.hide.{id}"))).on_click(move |_, _, cx| {
                     let id = id3.clone();
                     st.update(cx, |s, cx| s.command(cx, true, move |h| async move { h.hide_model(&id, !hidden).await }))
                 })),
@@ -1078,12 +1078,12 @@ impl ModelsPanel {
             let labels = ["in", "cache read", "cache write", "write 1 h", "out"];
             let mut grid = div().flex().flex_wrap().gap(px(8.)).mt(px(8.));
             for (i, l) in labels.iter().enumerate() {
-                grid = grid.child(div().w(px(76.)).flex().flex_col().gap(px(2.)).text_size(px(10.5)).text_color(k.muted).child(l.to_string()).child(Input::new(&inputs[i]).small()).child(probe(format!("rate.{i}"))));
+                grid = grid.child(div().w(px(76.)).flex().flex_col().gap(px(2.)).text_size(px(10.5)).text_color(k.muted).child(l.to_string()).child(Input::new(&inputs[i]).small()).children(probe(format!("rate.{i}"))));
             }
             cardv = cardv
                 .child(grid)
                 .child(div().mt(px(6.)).child(Input::new(&inputs[5]).small()))
-                .child(div().flex().items_center().mt(px(6.)).gap(px(8.)).child(div().flex_1().min_w_0().text_size(px(11.)).text_color(k.muted).child("A new rate applies from now; past calls keep the rate they were priced at.")).child(btn_small("saverate", "Save rate", Tone::Primary, cx).child(probe("rate.save")).on_click(cx.listener(|m, _, _, cx| m.save_edit(cx)))));
+                .child(div().flex().items_center().mt(px(6.)).gap(px(8.)).child(div().flex_1().min_w_0().text_size(px(11.)).text_color(k.muted).child("A new rate applies from now; past calls keep the rate they were priced at.")).child(btn_small("saverate", "Save rate", Tone::Primary, cx).children(probe("rate.save")).on_click(cx.listener(|m, _, _, cx| m.save_edit(cx)))));
         }
         if hist_open {
             let mut h = div().flex().flex_col().mt(px(8.)).text_size(px(11.5));
@@ -1155,7 +1155,7 @@ impl SettingsPanel {
 }
 fn picker(id: &str, label: String, items: Vec<(String, String, bool)>, on: impl Fn(String, &mut App) + 'static) -> impl IntoElement {
     let on = std::rc::Rc::new(on);
-    div().flex().child(picker_btn(id, label, items, on)).child(probe(format!("picker.{id}")))
+    div().flex().child(picker_btn(id, label, items, on)).children(probe(format!("picker.{id}")))
 }
 fn picker_btn(id: &str, label: String, items: Vec<(String, String, bool)>, on: std::rc::Rc<dyn Fn(String, &mut App)>) -> impl IntoElement {
     Button::new(SharedString::from(id.to_string())).outline().small().label(label).dropdown_caret(true).dropdown_menu(move |mut m, _, _| {
@@ -1191,11 +1191,11 @@ impl SettingsPanel {
             .flex()
             .gap(px(4.))
             .mb(px(12.))
-            .child(seg("tab-task", "Workspace", !global_tab, cx).child(probe("settings.task")).child(probe("settings.workspace")).on_click({
+            .child(seg("tab-task", "Workspace", !global_tab, cx).children(probe("settings.task")).children(probe("settings.workspace")).on_click({
                 let st = st_e.clone();
                 move |_, _, cx| st.update(cx, |s, cx| { s.prefs.settings_tab_global = false; s.save_prefs(); cx.notify(); })
             }))
-            .child(seg("tab-global", "App", global_tab, cx).child(probe("settings.global")).child(probe("settings.app")).on_click({
+            .child(seg("tab-global", "App", global_tab, cx).children(probe("settings.global")).children(probe("settings.app")).on_click({
                 let st = st_e.clone();
                 move |_, _, cx| st.update(cx, |s, cx| { s.prefs.settings_tab_global = true; s.save_prefs(); cx.notify(); })
             }));
@@ -1221,7 +1221,7 @@ impl SettingsPanel {
             let stats = s.stats.clone();
             let _ = (g, st1, st2, st3, log);
             return pad(div())
-                .child(probe("settings"))
+                .children(probe("settings"))
                 .child(tabs)
                 .child(engines)
                 .child(
@@ -1236,7 +1236,7 @@ impl SettingsPanel {
                                 s.save_prefs();
                                 cx.notify();
                             });
-                        })).child(probe("settings.theme")))
+                        })).children(probe("settings.theme")))
                         .child(
                             div()
                                 .flex()
@@ -1273,9 +1273,9 @@ impl SettingsPanel {
                                         .flex()
                                         .items_center()
                                         .gap(px(4.))
-                                        .child(btn_small("fs-minus", "−", Tone::Plain, cx).child(probe("settings.font.minus")).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::ZoomOut), cx)))
+                                        .child(btn_small("fs-minus", "−", Tone::Plain, cx).children(probe("settings.font.minus")).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::ZoomOut), cx)))
                                         .child(div().w(px(34.)).text_center().text_size(px(12.5)).child(format!("{font_size:.0}")))
-                                        .child(btn_small("fs-plus", "+", Tone::Plain, cx).child(probe("settings.font.plus")).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::ZoomIn), cx)))
+                                        .child(btn_small("fs-plus", "+", Tone::Plain, cx).children(probe("settings.font.plus")).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::ZoomIn), cx)))
                                         .child(btn_small("fs-reset", "reset", Tone::Ghost, cx).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::ZoomReset), cx))),
                                 ),
                         ),
@@ -1307,10 +1307,10 @@ impl SettingsPanel {
                 div()
                     .flex()
                     .gap(px(4.))
-                    .child(seg("dict-claude", "Claude", g.dictation == DictationService::Claude, cx).child(probe("settings.dict.claude")).on_click(move |_, _, cx| st2.update(cx, |s, cx| s.command(cx, false, |h| async move { { h.update_global(None, Some(DictationService::Claude)); Ok(String::new()) } }))))
-                    .child(seg("dict-codex", "Codex", g.dictation == DictationService::Codex, cx).child(probe("settings.dict.codex")).on_click(move |_, _, cx| st3.update(cx, |s, cx| s.command(cx, false, |h| async move { { h.update_global(None, Some(DictationService::Codex)); Ok(String::new()) } })))),
+                    .child(seg("dict-claude", "Claude", g.dictation == DictationService::Claude, cx).children(probe("settings.dict.claude")).on_click(move |_, _, cx| st2.update(cx, |s, cx| s.command(cx, false, |h| async move { { h.update_global(None, Some(DictationService::Claude)); Ok(String::new()) } }))))
+                    .child(seg("dict-codex", "Codex", g.dictation == DictationService::Codex, cx).children(probe("settings.dict.codex")).on_click(move |_, _, cx| st3.update(cx, |s, cx| s.command(cx, false, |h| async move { { h.update_global(None, Some(DictationService::Codex)); Ok(String::new()) } })))),
             );
-        let Some(st) = s.cur.settings.clone() else { return pad(div()).child(probe("settings")).child(tabs).child(ws_head).child(ws_global).into_any_element() };
+        let Some(st) = s.cur.settings.clone() else { return pad(div()).children(probe("settings")).child(tabs).child(ws_head).child(ws_global).into_any_element() };
         let info = s.info().cloned();
         let parent = info.as_ref().and_then(|i| i.task.parent).and_then(|p| s.tasks.get(&p)).map(|p| p.task.settings.depth);
         let max_depth = parent.map(|d| (d - 1).max(0)).unwrap_or(8);
@@ -1359,13 +1359,13 @@ impl SettingsPanel {
             })
         };
         pad(div())
-            .child(probe("settings"))
+            .children(probe("settings"))
             .child(tabs)
             .child(ws_head)
             .child(ws_global)
             .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).mt(px(6.)).mb(px(4.)).child(if task == 0 { "Main chat".to_string() } else { format!("Task #{task}") }))
             .child(div().text_size(px(12.)).text_color(k.muted).mb(px(12.)).child("New child tasks start with a copy of these (a parent may override parts)."))
-            .child(section(cx).child(section_title("instructions", cx)).child(div().child(Input::new(&self.instr)).child(probe("settings.instructions"))))
+            .child(section(cx).child(section_title("instructions", cx)).child(div().child(Input::new(&self.instr)).children(probe("settings.instructions"))))
             .child(section(cx).child(section_title("tasks", cx)).child(field("depth: how many levels of child tasks it may create (0 = none; a child gets at most its parent's − 1)")).child(picker("depth", format!("{}{}", st.depth, if st.depth == 0 { " (no task tools)" } else { "" }), (0..=max_depth).map(|d| (d.to_string(), format!("{d}{}", if d == 0 { " (no task tools)" } else { "" }), d == st.depth)).collect(), move |v, cx| {
                 let d: i64 = v.parse().unwrap_or(0);
                 let _ = me.update(cx, |p, cx| p.patch(SettingsPatch { depth: Some(d), ..Default::default() }, cx));
@@ -1408,7 +1408,7 @@ impl SettingsPanel {
     fn engines_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let k = c(cx).clone();
         let s = self.state.read(cx);
-        let mut sec = section(cx).child(section_title("engines and workspaces", cx)).child(probe("settings.engines"));
+        let mut sec = section(cx).child(section_title("engines and workspaces", cx)).children(probe("settings.engines"));
         if s.engines.is_empty() {
             sec = sec.child(div().text_size(px(12.)).text_color(k.muted).mb(px(8.)).child("No engine yet: add one (its address, e.g. chat.example.dev), then connect a workspace with its client token."));
         }
@@ -1449,6 +1449,6 @@ impl SettingsPanel {
             }
             sec = sec.child(div().mb(px(8.)).child(card_));
         }
-        sec.child(div().flex().gap(px(6.)).child(btn_small("eng-add", "Add engine…", Tone::Plain, cx).child(probe("settings.addEngine")).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::AddEngine), cx))).child(btn_small("ws-menu", "Workspaces…", Tone::Ghost, cx).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::WorkspaceMenu), cx))))
+        sec.child(div().flex().gap(px(6.)).child(btn_small("eng-add", "Add engine…", Tone::Plain, cx).children(probe("settings.addEngine")).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::AddEngine), cx))).child(btn_small("ws-menu", "Workspaces…", Tone::Ghost, cx).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::workspace::WorkspaceMenu), cx))))
     }
 }

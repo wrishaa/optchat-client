@@ -122,7 +122,7 @@ pub fn render_overlay(w: &mut Workspace, o: Overlay, _window: &mut Window, cx: &
                 .cursor_pointer()
                 .on_click(cx.listener(|w, _, window, cx| w.close_overlay(window, cx)))
                 .when_some(im, |d, i| d.child(img(i).max_w(relative(0.94)).max_h(relative(0.92)).object_fit(ObjectFit::Contain).rounded(px(8.))))
-                .child(probe("lightbox"))
+                .children(probe("lightbox"))
                 .into_any_element()
         }
     }
@@ -135,7 +135,7 @@ pub fn approval(w: &mut Workspace, a: Approval, cx: &mut Context<Workspace>) -> 
     let mk = |id: &'static str, label: &'static str, tone: Tone, accept: bool, persist: Option<&'static str>, cx: &mut Context<Workspace>| {
         let aid = a.id.clone();
         let st = w.state.clone();
-        btn(id, label, tone, cx).child(probe(format!("approve.{id}"))).on_click(move |_, _, cx| {
+        btn(id, label, tone, cx).children(probe(format!("approve.{id}"))).on_click(move |_, _, cx| {
             let aid = aid.clone();
             st.update(cx, |s, cx| s.command(cx, false, move |h| async move { { h.approve(&aid, accept, persist.map(String::from)); Ok(String::new()) } }))
         })
@@ -147,7 +147,7 @@ pub fn approval(w: &mut Workspace, a: Approval, cx: &mut Context<Workspace>) -> 
     overlay_bg("ov-approve", cx)
         .child(
             dialog_box(cx, 520.)
-                .child(probe("approval"))
+                .children(probe("approval"))
                 .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).mb(px(8.)).child(format!("Computer use{}", a.task.map(|t| format!(" · task #{t}")).unwrap_or_default())))
                 .child(div().text_color(k.text2).line_height(px(21.)).mb(px(14.)).child(a.message.clone()))
                 .when(!params.is_empty(), |d| d.child(div().mb(px(14.)).p(px(10.)).rounded(px(8.)).bg(k.code_bg).font_family(crate::ui::MONO).text_size(px(12.)).text_color(k.text2).child(params)))
@@ -268,7 +268,7 @@ impl Render for MetricsPop {
             .rounded(px(12.))
             .p(px(14.))
             .shadow_lg()
-            .child(probe("metrics"))
+            .children(probe("metrics"))
             .child(div().flex().items_center().mb(px(8.)).child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} · metrics", if t.parent.is_none() { "Main chat".to_string() } else { format!("#{}", t.id) }))).child(div().ml(px(6.)).text_size(px(11.)).text_color(k.muted).child("(own · with subtree)")))
             .child(table)
             .when(!t.status.terminal(), |d| {
@@ -281,7 +281,7 @@ impl Render for MetricsPop {
                             .gap(px(8.))
                             .mt(px(10.))
                             .when(has_budget, |d| d.child(btn_small("b-clear", "Clear", Tone::Ghost, cx).on_click(cx.listener(|p, _, _, cx| p.save(true, cx)))))
-                            .child(btn_small("b-set", "Set budget", Tone::Primary, cx).child(probe("metrics.set")).on_click(cx.listener(|p, _, _, cx| p.save(false, cx)))),
+                            .child(btn_small("b-set", "Set budget", Tone::Primary, cx).children(probe("metrics.set")).on_click(cx.listener(|p, _, _, cx| p.save(false, cx)))),
                     )
                     .child(div().mt(px(8.)).text_size(px(11.)).line_height(px(16.)).text_color(k.muted).child("Past any limit a task pauses with its subtree, and its parent hears which limit. Agent-time adds up across children working in parallel."))
             })
@@ -486,7 +486,7 @@ impl Render for NewTaskDialog {
                         dlg.mode = mm.clone();
                         cx.notify();
                     })))
-                    .child(probe(format!("newtask.mode.{m}")))
+                    .children(probe(format!("newtask.mode.{m}")))
                     .child(div().size(px(14.)).rounded_full().border_1().border_color(if on { k.accent } else { k.line2 }).flex().items_center().justify_center().when(on, |d| d.child(dot(k.accent, 7.))))
                     .child(div().w(px(70.)).font_weight(FontWeight::SEMIBOLD).child(m.to_string()))
                     .child(div().flex_1().text_size(px(12.)).text_color(k.muted).child(d.clone())),
@@ -502,7 +502,7 @@ impl Render for NewTaskDialog {
         let sib2 = siblings.clone();
         let mut thumbs = div().flex().gap(px(8.)).mb(px(10.));
         for (n, a) in self.images.iter().enumerate() {
-            thumbs = thumbs.child(div().id(("ntthumb", n)).relative().size(px(56.)).rounded(px(8.)).overflow_hidden().border_1().border_color(k.line2).child(img(a.img.clone()).size_full().object_fit(ObjectFit::Cover)).child(div().absolute().top(px(3.)).right(px(3.)).size(px(16.)).rounded_full().bg(hsla(0., 0., 0., 0.6)).flex().items_center().justify_center().text_size(px(11.)).text_color(gpui::white()).child("×").child(probe(format!("ntthumb.{n}")))).tooltip(tooltip("remove")).cursor_pointer().on_click(cx.listener(move |d, _, _, cx| {
+            thumbs = thumbs.child(div().id(("ntthumb", n)).relative().size(px(56.)).rounded(px(8.)).overflow_hidden().border_1().border_color(k.line2).child(img(a.img.clone()).size_full().object_fit(ObjectFit::Cover)).child(div().absolute().top(px(3.)).right(px(3.)).size(px(16.)).rounded_full().bg(hsla(0., 0., 0., 0.6)).flex().items_center().justify_center().text_size(px(11.)).text_color(gpui::white()).child("×").children(probe(format!("ntthumb.{n}")))).tooltip(tooltip("remove")).cursor_pointer().on_click(cx.listener(move |d, _, _, cx| {
                 if n < d.images.len() {
                     d.images.remove(n);
                 }
@@ -518,12 +518,12 @@ impl Render for NewTaskDialog {
             .on_action(cx.listener(|d, _: &NextField, window, cx| d.move_focus(1, window, cx)))
             .on_action(cx.listener(|d, _: &PrevField, window, cx| d.move_focus(-1, window, cx)))
             .overflow_y_scroll()
-            .child(probe("newtask"))
+            .children(probe("newtask"))
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).mb(px(6.)).child(format!("New task under {ptitle}")))
             .child(div().text_size(px(12.)).text_color(k.muted).mb(px(12.)).child(format!("You write as its parent. Its replies come back to {pname} as reports without waking it.")))
             .child(cards)
             .when(self.mode == "continue", |d| {
-                d.child(div().mb(px(10.)).flex().flex_col().gap(px(4.)).child(div().text_size(px(11.5)).text_color(k.muted).child("continue which task")).child(probe("newtask.prevrow")).child(Button::new("prev").outline().small().label(prev_label).dropdown_caret(true).dropdown_menu(move |mut m, _, _| {
+                d.child(div().mb(px(10.)).flex().flex_col().gap(px(4.)).child(div().text_size(px(11.5)).text_color(k.muted).child("continue which task")).children(probe("newtask.prevrow")).child(Button::new("prev").outline().small().label(prev_label).dropdown_caret(true).dropdown_menu(move |mut m, _, _| {
                     for (id, st, title) in &sib2 {
                         let me = me2.clone();
                         let id = *id;
@@ -537,8 +537,8 @@ impl Render for NewTaskDialog {
                     m
                 })))
             })
-            .child(div().mb(px(10.)).flex().flex_col().gap(px(4.)).child(div().text_size(px(11.5)).text_color(k.muted).child("title (imperative, ≤ 80 chars)")).child(div().child(Input::new(&self.title)).child(probe("newtask.title"))))
-            .child(div().mb(px(10.)).flex().flex_col().gap(px(4.)).child(div().text_size(px(11.5)).text_color(k.muted).child("instruction")).child(div().key_context("instruction").child(Input::new(&self.instruction)).child(probe("newtask.instruction"))))
+            .child(div().mb(px(10.)).flex().flex_col().gap(px(4.)).child(div().text_size(px(11.5)).text_color(k.muted).child("title (imperative, ≤ 80 chars)")).child(div().child(Input::new(&self.title)).children(probe("newtask.title"))))
+            .child(div().mb(px(10.)).flex().flex_col().gap(px(4.)).child(div().text_size(px(11.5)).text_color(k.muted).child("instruction")).child(div().key_context("instruction").child(Input::new(&self.instruction)).children(probe("newtask.instruction"))))
             .when(!self.images.is_empty(), |d| d.child(thumbs))
             .child(
                 div()
@@ -562,7 +562,7 @@ impl Render for NewTaskDialog {
                         }
                         m.max_h(px(360.)).scrollable(true)
                     }))
-                    .child(div().w(px(96.)).child(Input::new(&self.usd).small()).child(probe("newtask.usd")))
+                    .child(div().w(px(96.)).child(Input::new(&self.usd).small()).children(probe("newtask.usd")))
                     .child(div().w(px(96.)).child(Input::new(&self.minutes).small())),
             )
             .child(
@@ -572,8 +572,8 @@ impl Render for NewTaskDialog {
                     .gap(px(8.))
                     .child(btn("nt-cancel", "Cancel", Tone::Plain, cx).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))))
                     .child(div().flex_1())
-                    .child(disabled(btn("nt-add", "Add", Tone::Plain, cx), !ok).tooltip(tooltip("add it as pending: it waits until you start it")).child(probe("newtask.add")).when(ok, |d| d.on_click(cx.listener(|d, _, _, cx| d.create(false, cx)))))
-                    .child(disabled(btn("nt-start", "Start", Tone::Primary, cx), !ok).tooltip(tooltip("⌘Enter")).child(probe("newtask.start")).when(ok, |d| d.on_click(cx.listener(|d, _, _, cx| d.create(true, cx))))),
+                    .child(disabled(btn("nt-add", "Add", Tone::Plain, cx), !ok).tooltip(tooltip("add it as pending: it waits until you start it")).children(probe("newtask.add")).when(ok, |d| d.on_click(cx.listener(|d, _, _, cx| d.create(false, cx)))))
+                    .child(disabled(btn("nt-start", "Start", Tone::Primary, cx), !ok).tooltip(tooltip("⌘Enter")).children(probe("newtask.start")).when(ok, |d| d.on_click(cx.listener(|d, _, _, cx| d.create(true, cx))))),
             )
     }
 }
@@ -802,7 +802,7 @@ impl Render for Palette {
                     cx.emit(PaletteEvent::Run(cmd));
                 }
             }))
-            .child(probe("palette"))
+            .children(probe("palette"))
             .child(div().p(px(8.)).border_b_1().border_color(k.line).child(Input::new(&self.query).appearance(false)))
             .child(list)
     }

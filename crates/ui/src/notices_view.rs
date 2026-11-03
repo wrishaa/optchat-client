@@ -77,7 +77,7 @@ impl NoticesPanel {
                             .when(n.count.unwrap_or(1) > 1, |d| d.child(format!("×{}", n.count.unwrap_or(1)))),
                     ),
             )
-            .child(probe(format!("notif.row.{i}")))
+            .children(probe(format!("notif.row.{i}")))
             .on_click(cx.listener(move |p, _, _, cx| {
                 let id = id.clone();
                 p.state.update(cx, |s, cx| s.read_notices(Some(vec![id]), None, cx));
@@ -119,7 +119,7 @@ impl Render for NoticesPanel {
                 .when(on, |d| d.bg(kk.selected).text_color(kk.text))
                 .when(!on, |d| d.text_color(kk.muted).hover(move |s| s.bg(kk.hover)))
                 .child(label)
-                .child(probe(format!("notif.filter.{id}")))
+                .children(probe(format!("notif.filter.{id}")))
                 .on_click(cx.listener(move |p, _, _, cx| {
                     p.level = id;
                     cx.notify();
@@ -155,7 +155,7 @@ impl Render for NoticesPanel {
                     .cursor_pointer()
                     .child(icon(if unread_only { "eye-off" } else { "eye" }, 13., if unread_only { k.text } else { k.muted }))
                     .child(if unread_only { "unread only" } else { "read and unread" })
-                    .child(probe("notif.unreadOnly"))
+                    .children(probe("notif.unreadOnly"))
                     .on_click(cx.listener(|p, _, _, cx| {
                         p.unread_only = !p.unread_only;
                         cx.notify();
@@ -164,7 +164,7 @@ impl Render for NoticesPanel {
             .child(div().flex_1())
             .child(
                 btn_small("nf-readall", if level == "all" { "Mark all read".to_string() } else { "Mark these read".to_string() }, Tone::Ghost, cx)
-                    .child(probe("notif.readAll"))
+                    .children(probe("notif.readAll"))
                     .on_click(cx.listener(move |p, _, _, cx| {
                         let lv = lv.clone();
                         p.state.update(cx, |s, cx| s.read_notices(None, lv, cx));
@@ -177,7 +177,7 @@ impl Render for NoticesPanel {
         for (i, n) in shown.iter().enumerate() {
             list = list.child(self.row(i, n, cx));
         }
-        let body = div().flex().flex_col().child(filters).child(tools).child(list).child(probe("notifications"));
+        let body = div().flex().flex_col().child(filters).child(tools).child(list).children(probe("notifications"));
         crate::ui::scroll_body("NoticesPanel", body.into_any_element())
     }
 }

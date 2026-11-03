@@ -23,11 +23,17 @@ serde_json.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
 log.workspace = true
+# glibc malloc was ~a quarter of the ui thread's busy time on the tv (gpui allocates per element per frame)
+mimalloc = { version = "0.1", default-features = false, optional = true }
+libc = { version = "0.2", optional = true }
 
 [features]
-default = []
+default = ["mimalloc"]
 # dev-only: screenshots, the ui test channel, a recorded clip as the mic, log lines, all through the mac dev server
 # (optchat-scratch/tizen/scripts/devsrv.py). build with `build.sh --dev-capture`; never on in normal builds.
 dev-capture = ["gpui_wgpu/frame-capture", "dep:image"]
 # temporary: cycle every bundled theme (15 s each, name on top) to pick the tv's theme. `build.sh --theme-preview`
 theme-preview = []
+# dev-only: frame / input counters in the renderer (gpui_wgpu perf-counters), sampled with cpu / memory through the
+# dev channel (`tvdev.py perf`). `build.sh --dev-capture --perf`
+perf = ["dev-capture", "gpui_wgpu/perf-counters", "dep:libc"]

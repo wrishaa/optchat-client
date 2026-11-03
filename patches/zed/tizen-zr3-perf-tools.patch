@@ -1,0 +1,30 @@
+diff --git a/crates/gpui/src/taffy.rs b/crates/gpui/src/taffy.rs
+index 4c87a3e..6fea9ba 100644
+--- a/crates/gpui/src/taffy.rs
++++ b/crates/gpui/src/taffy.rs
+@@ -218,6 +218,9 @@ impl TaffyLayoutEngine {
+             }
+         }
+ 
++        if crate::perf_hook::HOOK.get().is_some() {
++            crate::perf_hook::end_value("taffyNodes", self.taffy.total_node_count() as f32);
++        }
+         let scale_factor = window.scale_factor();
+ 
+         let transform = |v: AvailableSpace| match v {
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+index 8c1271d..f83a329 100644
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -39,6 +39,11 @@ pub mod perf_hook {
+             f("gComputeLayoutCalls", LAYOUT_N.swap(0, std::sync::atomic::Ordering::Relaxed) as f32);
+         }
+     }
++    pub fn end_value(name: &'static str, v: f32) {
++        if let Some(f) = HOOK.get() {
++            f(name, v)
++        }
++    }
+     #[inline]
+     pub fn end(name: &'static str, t: Option<std::time::Instant>) {
+         if let (Some(f), Some(t)) = (HOOK.get(), t) {

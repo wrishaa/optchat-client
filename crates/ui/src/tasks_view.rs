@@ -31,6 +31,7 @@ impl TasksPanel {
 }
 impl Render for TasksPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _t = crate::ui::rtime::guard("tasks");
         // a cached view is laid out at the size its parent gives it, so the panel scrolls itself
         crate::ui::anim::area(crate::ui::anim::TASKS);
         let body = self.body(window, cx).into_any_element();
@@ -158,7 +159,7 @@ pub fn render(w: &mut TasksPanel, _window: &mut Window, cx: &mut Context<TasksPa
         list = list.child(row(w, &x, depth, path, kids, cx));
     }
     if no_kids && !scope_all {
-        list = list.child(div().pl(px(40. + up_n as f32 * 14.)).py(px(6.)).text_size(px(12.)).text_color(k.faint).child("no subtasks yet").child(probe("tasks.nokids")));
+        list = list.child(div().pl(px(40. + up_n as f32 * 14.)).py(px(6.)).text_size(px(12.)).text_color(k.faint).child("no subtasks yet").children(probe("tasks.nokids")));
     }
     list
 }
@@ -226,14 +227,14 @@ fn row(w: &TasksPanel, x: &TaskInfo, depth: usize, path: bool, kids: usize, cx: 
         .when(is_cur, |d| d.bg(k.accent_bg).text_color(k.text).child(div().absolute().left_0().top(px(6.)).bottom(px(6.)).w(px(2.)).bg(k.accent)))
         .when(!is_cur, |d| d.hover(move |s| s.bg(hover)))
         .relative()
-        .child(probe(format!("trow.{id}")))
+        .children(probe(format!("trow.{id}")))
         .child(
             div()
                 .id(SharedString::from(format!("tw-{id}")))
                 .w(px(12.))
                 .flex_none()
                 .when(kids > 0, |d| {
-                    d.child(chevron(format!("trow{id}"), 13., k.faint, open)).child(probe(format!("trow.chev.{id}"))).on_click(cx.listener(move |w, _, _, cx| {
+                    d.child(chevron(format!("trow{id}"), 13., k.faint, open)).children(probe(format!("trow.chev.{id}"))).on_click(cx.listener(move |w, _, _, cx| {
                         cx.stop_propagation();
                         if !w.collapsed.remove(&id) {
                             w.collapsed.insert(id);
@@ -243,7 +244,7 @@ fn row(w: &TasksPanel, x: &TaskInfo, depth: usize, path: bool, kids: usize, cx: 
                 }),
         )
         // the dot has its own tooltip: title, mode, status (with the reason) and the result
-        .child(div().id(SharedString::from(format!("trdot-{id}"))).flex_none().p(px(2.)).child(status_dot(format!("tr{id}"), t.status.as_str(), 8., cx)).child(probe(format!("trow.dot.{id}"))).when(!w.menu_open, |d| d.tooltip(tooltip(dot_tip)))) 
+        .child(div().id(SharedString::from(format!("trdot-{id}"))).flex_none().p(px(2.)).child(status_dot(format!("tr{id}"), t.status.as_str(), 8., cx)).children(probe(format!("trow.dot.{id}"))).when(!w.menu_open, |d| d.tooltip(tooltip(dot_tip)))) 
         .child(
             div()
                 .id(SharedString::from(format!("trtext-{id}")))

@@ -49,6 +49,14 @@ impl View {
     }
 }
 
+/// min ms between redraws caused by engine events (0: every batch at once); see `set_engine_redraw_gap`
+static PUMP_MIN_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// coalesce engine-driven redraws (the tv: each frame is ~80 ms of its cpu + gpu, and a key press waits behind one)
+pub fn set_engine_redraw_gap(ms: u64) {
+    PUMP_MIN_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A connection: a workspace on an engine (its token is in the Keychain under the same key).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ConnPref {
@@ -440,6 +448,12 @@ impl AppState {
                 });
                 if ok.is_err() {
                     break;
+                }
+                // a slow device (the tv) redraws for engine traffic at most this often: what arrives meanwhile is
+                // applied as one batch. The first event after a quiet spell still shows at once.
+                let gap = PUMP_MIN_MS.load(std::sync::atomic::Ordering::Relaxed);
+                if gap > 0 {
+                    crate::timer::Timer::after(std::time::Duration::from_millis(gap)).await;
                 }
             }
         }));

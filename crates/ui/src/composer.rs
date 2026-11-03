@@ -377,7 +377,7 @@ impl Composer {
             .cursor_pointer()
             .relative()
             .tooltip(tooltip("dictate (M)"))
-            .child(probe("composer.mic"));
+            .children(probe("composer.mic"));
         let b: AnyElement = match st.as_str() {
             "listening" | "finishing" => {
                 let mut bars = div().flex().items_center().gap(px(2.)).h(px(16.));
@@ -410,6 +410,7 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _t = crate::ui::rtime::guard("composer");
         crate::ui::anim::area(crate::ui::anim::WORKSPACE);
         let k = c(cx).clone();
         let s = self.state.read(cx);
@@ -466,7 +467,7 @@ impl Render for Composer {
                             .justify_center()
                             .cursor_pointer()
                             .child(icon("x", 11., white()))
-                            .child(probe(format!("thumbx.{n}")))
+                            .children(probe(format!("thumbx.{n}")))
                             .on_click(cx.listener(move |c, _, _, cx| {
                                 if n < c.images.len() {
                                     c.images.remove(n);
@@ -530,9 +531,9 @@ impl Render for Composer {
                             .pr(px(10.))
                             .pt(px(8.))
                             .pb(px(8.))
-                            .child(probe("composer"))
+                            .children(probe("composer"))
                             .when(!self.images.is_empty(), |d| d.child(thumbs))
-                            .child(div().child(Input::new(&self.input).appearance(false).disabled(dictating).text_size(px(14.5))).child(probe("composer.input")))
+                            .child(div().child(Input::new(&self.input).appearance(false).disabled(dictating).text_size(px(14.5))).children(probe("composer.input")))
                             .child(
                                 div()
                                     .flex()
@@ -543,7 +544,7 @@ impl Render for Composer {
                                     .child(div().flex_1())
                                     .when(stoppable, |d| {
                                         let st = self.state.clone();
-                                        d.child(btn("stop", "Stop", Tone::Danger, cx).child(probe("composer.stop")).on_click(move |_, _, cx| {
+                                        d.child(btn("stop", "Stop", Tone::Danger, cx).children(probe("composer.stop")).on_click(move |_, _, cx| {
                                             st.update(cx, |s, cx| s.command(cx, false, move |h| async move { { h.stop(task); Ok(String::new()) } }))
                                         }))
                                     })
@@ -561,7 +562,7 @@ impl Render for Composer {
                                                 .items_center()
                                                 .justify_center()
                                                 .child(icon("arrow-up", 16., k.text2))
-                                                .child(probe("composer.append"))
+                                                .children(probe("composer.append"))
                                                 .tooltip(tooltip("add to the context (⌘Enter)"))
                                                 .when(off, |d| d.opacity(0.4))
                                                 .when(!off, |d| d.cursor_pointer().hover(|s| s.border_color(k.muted)).on_click(cx.listener(|c, _, w, cx| c.submit(false, w, cx)))),
@@ -577,7 +578,7 @@ impl Render for Composer {
                                             .items_center()
                                             .justify_center()
                                             .child(icon("arrow-right", 16., k.on_accent))
-                                            .child(probe("composer.run"))
+                                            .children(probe("composer.run"))
                                             .tooltip(tooltip("run (Enter)"))
                                             .when(run_off, |d| d.opacity(0.4))
                                             .when(!run_off, |d| d.cursor_pointer().hover(|s| s.bg(k.accent)).on_click(cx.listener(|c, _, w, cx| c.submit(true, w, cx)))),

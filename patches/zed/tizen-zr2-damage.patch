@@ -1,0 +1,497 @@
+diff --git a/crates/gpui/src/view.rs b/crates/gpui/src/view.rs
+index f24a4da..7d4fc97 100644
+--- a/crates/gpui/src/view.rs
++++ b/crates/gpui/src/view.rs
+@@ -328,6 +328,8 @@ impl<V: View> Element for ViewElement<V> {
+         window: &mut Window,
+         cx: &mut App,
+     ) -> (LayoutId, Self::RequestLayoutState) {
++        let perf_t = crate::window::perf_hook::start();
++        let r = (|| {
+         if let Some(entity_id) = self.entity_id {
+             // Stateful path: create a reactive boundary.
+             let view = &mut self.view;
+@@ -348,6 +350,11 @@ impl<V: View> Element for ViewElement<V> {
+                     .into_any_element()
+             })
+         }
++            })();
++        if perf_t.is_some() {
++            crate::window::perf_hook::end(perf_view_name::<V>("rl"), perf_t);
++        }
++        r
+     }
+ 
+     fn prepaint(
+@@ -359,6 +366,8 @@ impl<V: View> Element for ViewElement<V> {
+         window: &mut Window,
+         cx: &mut App,
+     ) -> Option<AnyElement> {
++        let perf_t = crate::window::perf_hook::start();
++        let r = (|| {
+         if let Some(entity_id) = self.entity_id {
+             // Stateful path.
+             prepaint_view(
+@@ -380,6 +389,11 @@ impl<V: View> Element for ViewElement<V> {
+             // Stateless path: just prepaint the element.
+             prepaint_component(type_name::<V>(), element, window, cx)
+         }
++            })();
++        if perf_t.is_some() {
++            crate::window::perf_hook::end(perf_view_name::<V>("pp"), perf_t);
++        }
++        r
+     }
+ 
+     fn paint(
+@@ -419,6 +433,22 @@ impl Render for EmptyView {
+ }
+ 
+ #[inline(never)]
++/// dev perf (optchat tizen): "rl:Type" / "pp:Type" per view element (render+request_layout; layout+prepaint)
++fn perf_view_name<V: 'static>(phase: &'static str) -> &'static str {
++    use std::sync::Mutex;
++    static NAMES: Mutex<Vec<(std::any::TypeId, &'static str, &'static str)>> = Mutex::new(Vec::new());
++    let id = std::any::TypeId::of::<V>();
++    let mut v = NAMES.lock().unwrap();
++    if let Some(n) = v.iter().find(|(t, p, _)| *t == id && *p == phase) {
++        return n.2;
++    }
++    let full = type_name::<V>();
++    let short = full.rsplit("::").next().unwrap_or(full).trim_end_matches('>');
++    let n: &'static str = Box::leak(format!("{phase}:{short}").into_boxed_str());
++    v.push((id, phase, n));
++    n
++}
++
+ fn request_layout_view(
+     entity_id: EntityId,
+     cached_style: Option<&StyleRefinement>,
+@@ -458,6 +488,16 @@ fn request_layout_component(
+     })
+ }
+ 
++fn perf_leak(s: String) -> &'static str {
++    use std::sync::Mutex;
++    static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
++    let mut v = NAMES.lock().unwrap();
++    if let Some(n) = v.iter().find(|n| **n == s) { return n; }
++    let n: &'static str = Box::leak(s.into_boxed_str());
++    v.push(n);
++    n
++}
++
+ #[inline(never)]
+ fn prepaint_view(
+     entity_id: EntityId,
+@@ -481,6 +521,13 @@ fn prepaint_view(
+                 let content_mask = window.content_mask();
+                 let text_style = window.text_style();
+ 
++                let perf_why: &'static str = match &element_state {
++                    None => "vMiss:new",
++                    Some(_) if window.refreshing => "vMiss:refresh",
++                    Some(_) if window.dirty_views.contains(&entity_id) => "vMiss:dirty",
++                    Some(e) if e.cache_key.bounds != bounds => "vMiss:bounds",
++                    Some(_) => "vMiss:other",
++                };
+                 if let Some(mut element_state) = element_state
+                     && element_state.cache_key.bounds == bounds
+                     && element_state.cache_key.content_mask == content_mask
+@@ -495,8 +542,10 @@ fn prepaint_view(
+                     let prepaint_end = window.prepaint_index();
+                     element_state.prepaint_range = prepaint_start..prepaint_end;
+ 
++                    crate::window::perf_hook::end("vHit", crate::window::perf_hook::start());
+                     return (None, element_state);
+                 }
++                let perf_t = crate::window::perf_hook::start();
+ 
+                 let refreshing = mem::replace(&mut window.refreshing, true);
+                 let prepaint_start = window.prepaint_index();
+@@ -509,6 +558,11 @@ fn prepaint_view(
+ 
+                 let prepaint_end = window.prepaint_index();
+                 window.refreshing = refreshing;
++                if perf_t.is_some() {
++                    crate::window::perf_hook::end(perf_why, perf_t);
++                    let n = perf_leak(format!("{}:{}", perf_why, entity_id.as_u64()));
++                    crate::window::perf_hook::end(n, perf_t);
++                }
+ 
+                 (
+                     Some(element),
+diff --git a/crates/gpui_wgpu/src/damage.rs b/crates/gpui_wgpu/src/damage.rs
+new file mode 100644
+index 0000000..9b426e0
+--- /dev/null
++++ b/crates/gpui_wgpu/src/damage.rs
+@@ -0,0 +1,148 @@
++//! optchat (tizen tv): damage-limited redraw.
++//!
++//! On the GLES/EGL backend the surface texture is one persistent renderbuffer (blitted to the window at
++//! present), so a frame only has to redraw the pixels whose primitives changed since the previous frame.
++//! The previous frame's primitives are kept as (hash, visible bounds) per kind; the damage is the union of
++//! the bounds of every primitive that differs at the same index (old and new), plus any length change. The
++//! whole scene is then drawn with a scissor at the damage rect over the loaded old pixels, which gives the
++//! same pixels as a full redraw inside the rect.
++//!
++//! Opt-in with GPUI_DAMAGE=1 (set by the tizen shell); never on swapchains that rotate textures.
++
++use gpui::{Bounds, ContentMask, ScaledPixels, Scene};
++
++#[derive(Default)]
++pub struct Digest {
++    kinds: [Vec<(u64, [f32; 4])>; 7],
++    size: (i32, i32),
++}
++
++thread_local!(pub static STATS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) });
++
++pub fn enabled() -> bool {
++    use std::sync::OnceLock;
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| std::env::var("GPUI_DAMAGE").is_ok_and(|v| v == "1"))
++}
++
++fn h<T: Copy>(x: &T) -> u64 {
++    // repr(C) plain-data primitives (f32/u32 fields): hash the raw bytes
++    let b = unsafe { std::slice::from_raw_parts(x as *const T as *const u8, std::mem::size_of::<T>()) };
++    words(b)
++}
++
++fn words(b: &[u8]) -> u64 {
++    // fx-style word hash (cheap on armv7)
++    let mut s: u64 = 0;
++    let mut it = b.chunks_exact(4);
++    for w in &mut it {
++        s = (s.rotate_left(5) ^ u32::from_ne_bytes([w[0], w[1], w[2], w[3]]) as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
++    }
++    for &x in it.remainder() {
++        s = (s.rotate_left(5) ^ x as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
++    }
++    s
++}
++
++fn vis(b: &Bounds<ScaledPixels>, m: &ContentMask<ScaledPixels>, grow: f32) -> [f32; 4] {
++    let x0 = (b.origin.x.0 - grow).max(m.bounds.origin.x.0);
++    let y0 = (b.origin.y.0 - grow).max(m.bounds.origin.y.0);
++    let x1 = (b.origin.x.0 + b.size.width.0 + grow).min(m.bounds.origin.x.0 + m.bounds.size.width.0);
++    let y1 = (b.origin.y.0 + b.size.height.0 + grow).min(m.bounds.origin.y.0 + m.bounds.size.height.0);
++    [x0, y0, x1, y1]
++}
++
++fn tgrow(b: &Bounds<ScaledPixels>, identity: bool) -> f32 {
++    if identity { 0.0 } else { b.size.width.0.max(b.size.height.0) * 0.5 }
++}
++
++impl Digest {
++    pub fn of(scene: &Scene, size: (i32, i32)) -> Self {
++        let mut d = Digest { size, ..Default::default() };
++        d.kinds[0] = scene.quads.iter().map(|q| (h(q), vis(&q.bounds, &q.content_mask, 1.0))).collect();
++        d.kinds[1] = scene.shadows.iter().map(|q| (h(q), vis(&q.bounds, &q.content_mask, q.blur_radius.0 * 3.0 + 2.0))).collect();
++        d.kinds[2] = scene.underlines.iter().map(|q| (h(q), vis(&q.bounds, &q.content_mask, 2.0))).collect();
++        d.kinds[3] = scene
++            .monochrome_sprites
++            .iter()
++            .map(|q| (h(q), vis(&q.bounds, &q.content_mask, 1.0 + tgrow(&q.bounds, q.transformation == gpui::TransformationMatrix::unit()))))
++            .collect();
++        d.kinds[4] = scene
++            .subpixel_sprites
++            .iter()
++            .map(|q| (h(q), vis(&q.bounds, &q.content_mask, 1.0 + tgrow(&q.bounds, q.transformation == gpui::TransformationMatrix::unit()))))
++            .collect();
++        d.kinds[5] = scene.polychrome_sprites.iter().map(|q| (h(q), vis(&q.bounds, &q.content_mask, 1.0))).collect();
++        d.kinds[6] = scene
++            .paths
++            .iter()
++            .map(|p| {
++                (words(format!("{:?}", p).as_bytes()), vis(&p.bounds, &p.content_mask, 2.0))
++            })
++            .collect();
++        d
++    }
++
++    /// The device-pixel rect (x, y, w, h) to redraw, or None for a full redraw.
++    pub fn damage(prev: Option<&Digest>, next: &Digest, scene: &Scene) -> Option<[u32; 4]> {
++        let prev = prev?;
++        if prev.size != next.size || !scene.surfaces.is_empty() {
++            return None;
++        }
++        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
++        let mut add = |r: &[f32; 4]| {
++            if r[2] > r[0] && r[3] > r[1] {
++                x0 = x0.min(r[0]);
++                y0 = y0.min(r[1]);
++                x1 = x1.max(r[2]);
++                y1 = y1.max(r[3]);
++            }
++        };
++        let mut st = String::new();
++        for (k, (a, b)) in prev.kinds.iter().zip(next.kinds.iter()).enumerate() {
++            let n = a.len().max(b.len());
++            let mut nd = 0;
++            for i in 0..n {
++                match (a.get(i), b.get(i)) {
++                    (Some(p), Some(q)) if p.0 == q.0 => {}
++                    (p, q) => {
++                        if crate::perf::ENABLED && nd < 2 { st += &format!(" k{k}[{i}] {:?}->{:?}", p.map(|p| p.1), q.map(|q| q.1)); }
++                        nd += 1;
++                        if let Some(p) = p { add(&p.1) }
++                        if let Some(q) = q { add(&q.1) }
++                    }
++                }
++            }
++            if crate::perf::ENABLED && nd > 0 { st += &format!(" n{k}={nd}/{}", b.len()); }
++        }
++        STATS.with(|c| *c.borrow_mut() = st);
++        let (w, hh) = (next.size.0 as f32, next.size.1 as f32);
++        if x1 <= x0 || y1 <= y0 {
++            // nothing changed: redraw one pixel (the frame is still presented, for frame callbacks)
++            return Some([0, 0, 1, 1]);
++        }
++        let x0 = x0.floor().max(0.0);
++        let y0 = y0.floor().max(0.0);
++        let x1 = x1.ceil().min(w);
++        let y1 = y1.ceil().min(hh);
++        if x1 <= x0 || y1 <= y0 {
++            return Some([0, 0, 1, 1]);
++        }
++        // mostly everything: a plain full redraw (lets the base quad become a clear)
++        if (x1 - x0) * (y1 - y0) > 0.7 * w * hh {
++            return None;
++        }
++        Some([x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32])
++    }
++}
++
++static STASH: std::sync::Mutex<Option<(u32, u32, Vec<u8>)>> = std::sync::Mutex::new(None);
++/// dev: the hal readback lands here (frame-capture)
++#[allow(dead_code)]
++pub fn stash(w: u32, h: u32, px: Vec<u8>) {
++    *STASH.lock().unwrap() = Some((w, h, px));
++}
++#[allow(dead_code)]
++pub fn take_stash() -> Option<(u32, u32, Vec<u8>)> {
++    STASH.lock().unwrap().take()
++}
+diff --git a/crates/gpui_wgpu/src/gpui_wgpu.rs b/crates/gpui_wgpu/src/gpui_wgpu.rs
+index d061211..addb063 100644
+--- a/crates/gpui_wgpu/src/gpui_wgpu.rs
++++ b/crates/gpui_wgpu/src/gpui_wgpu.rs
+@@ -4,6 +4,7 @@ pub mod frame_capture;
+ /// dev-only frame / input counters (feature perf-counters; empty fns otherwise)
+ pub mod perf;
+ mod quad_cull;
++mod damage;
+ mod wgpu_atlas;
+ mod wgpu_context;
+ mod wgpu_renderer;
+diff --git a/crates/gpui_wgpu/src/wgpu_renderer.rs b/crates/gpui_wgpu/src/wgpu_renderer.rs
+index 77479d1..59920db 100644
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -213,6 +213,8 @@ impl WgpuResources {
+ }
+ 
+ struct WgpuRendererCore {
++    /// optchat tizen: redraw only this device-pixel rect over the loaded old frame (crate::damage)
++    damage: Option<[u32; 4]>,
+     resources: WgpuResources,
+     atlas: Arc<WgpuAtlas>,
+     path_globals_offset: u64,
+@@ -264,6 +266,9 @@ pub struct WgpuRenderer {
+     observed_error_generation: u64,
+     last_surface_error: Option<String>,
+     needs_redraw: bool,
++    /// optchat tizen: the last presented frame's primitives (crate::damage)
++    prev_digest: Option<crate::damage::Digest>,
++    last_damage: Option<[u32; 4]>,
+ }
+ 
+ impl WgpuRenderer {
+@@ -480,6 +485,8 @@ impl WgpuRenderer {
+             observed_error_generation: 0,
+             last_surface_error: None,
+             needs_redraw: false,
++            prev_digest: None,
++            last_damage: None,
+         })
+     }
+ }
+@@ -1080,6 +1087,7 @@ impl WgpuRenderer {
+         resources.invalidate_intermediate_textures();
+ 
+         if let RendererState::Ready { surface, core } = &self.state {
++            self.prev_digest = None;
+             surface.configure(&core.resources.device, &self.surface_config);
+         }
+     }
+@@ -1118,6 +1126,7 @@ impl WgpuRenderer {
+         );
+ 
+         if let RendererState::Ready { surface, core } = &self.state {
++            self.prev_digest = None;
+             surface.configure(&core.resources.device, &self.surface_config);
+         }
+     }
+@@ -1249,6 +1258,7 @@ impl WgpuRenderer {
+             self.failed_frame_count = 0;
+         }
+ 
++        let prev_digest = self.prev_digest.take();
+         let perf_t = crate::perf::now();
+         let frame = match surface.get_current_texture() {
+             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+@@ -1284,21 +1294,72 @@ impl WgpuRenderer {
+         let perf_t = crate::perf::now();
+         let premultiplied_alpha =
+             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+-        if let Err(error) = core.render_frame(
++        // perf bit 65536: damage off (dev A/B)
++        let perf_d = crate::perf::now();
++        let digest = (crate::damage::enabled() && !crate::perf::skip(65536)).then(|| crate::damage::Digest::of(scene, (size.width.0, size.height.0)));
++        core.damage = digest.as_ref().and_then(|d| crate::damage::Digest::damage(prev_digest.as_ref(), d, scene));
++        if let Some(t) = perf_d { crate::perf::phase("digest", t); }
++        if digest.is_some() && crate::perf::skip(32768) {
++            // dev A/B: pretend only a 64px corner changed (wrong pixels; measures the fixed per-frame cost)
++            core.damage = Some([0, 0, 64, 64]);
++        }
++        if crate::perf::ENABLED && digest.is_some() {
++            let a = core.damage.map_or(1.0, |r| (r[2] * r[3]) as f32 / (size.width.0 * size.height.0) as f32);
++            crate::perf::sample("damageFrac", a);
++            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++            if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 40 < 6 {
++                log::info!("perf damage {:?}{}", core.damage, crate::damage::STATS.with(|c| c.borrow().clone()));
++            }
++        }
++        let r = core.render_frame(
+             scene,
+             &frame_view,
+             size,
+             premultiplied_alpha,
+             wgpu::Color::TRANSPARENT,
+-        ) {
++        );
++        self.last_damage = core.damage;
++        core.damage = None;
++        if let Err(error) = r {
+             log::error!("{error:#}");
+             return false;
+         }
+ 
+         if let Some(t) = perf_t { crate::perf::phase("encodeSubmit", t); }
++        // dev: with damage-limited frames, a screenshot is the presented renderbuffer itself (read back by
++        // vendor/wgpu-hal gles at present), not a re-render: it shows any stale pixels
++        #[cfg(all(feature = "frame-capture", target_os = "linux"))]
++        let read_back = if digest.is_some() { crate::frame_capture::take_request() } else { None };
++        #[cfg(all(feature = "frame-capture", target_os = "linux"))]
++        if read_back.is_some() {
++            let _ = wgpu::hal::gles::oc_readback::SINK.set(crate::damage::stash);
++            wgpu::hal::gles::oc_readback::WANT.store(true, std::sync::atomic::Ordering::SeqCst);
++        }
+         let perf_t = crate::perf::now();
+         frame.present();
++        self.prev_digest = digest;
+         if let Some(t) = perf_t { crate::perf::phase("present", t); }
++        // dev: the presented pixels go to the capture sink; with GPUI_DAMAGE_CHECK=1 they are also compared with a
++        // full re-render of the same scene (logged as "damage check")
++        #[cfg(all(feature = "frame-capture", target_os = "linux"))]
++        if let (Some(sink), Some((w, h, px))) = (read_back, crate::damage::take_stash()) {
++            if std::env::var("GPUI_DAMAGE_CHECK").is_ok_and(|v| v == "1") {
++                match core.capture_frame(scene, size, premultiplied_alpha) {
++                    Ok((_, _, full)) => {
++                        let (mut n, mut x0, mut y0, mut x1, mut y1) = (0u32, u32::MAX, u32::MAX, 0u32, 0u32);
++                        for (i, (a, b)) in px.chunks_exact(4).zip(full.chunks_exact(4)).enumerate() {
++                            if a != b {
++                                let (x, y) = (i as u32 % w, i as u32 / w);
++                                n += 1; x0 = x0.min(x); y0 = y0.min(y); x1 = x1.max(x); y1 = y1.max(y);
++                            }
++                        }
++                        log::info!("damage check: {n} px differ (box {x0},{y0}-{x1},{y1}) damage {:?}", self.last_damage);
++                    }
++                    Err(error) => log::error!("frame capture failed: {error:#}"),
++                }
++            }
++            sink(w, h, px);
++        }
+         #[cfg(feature = "frame-capture")]
+         if let Some(sink) = crate::frame_capture::take_request() {
+             match core.capture_frame(scene, size, premultiplied_alpha) {
+@@ -1489,6 +1550,7 @@ impl WgpuRendererCore {
+         let max_texture_size = device.limits().max_texture_dimension_2d;
+ 
+         Self {
++            damage: None,
+             resources: WgpuResources {
+                 device,
+                 queue,
+@@ -1619,7 +1681,8 @@ impl WgpuRendererCore {
+             bytemuck::bytes_of(&gamma_params),
+         );
+ 
+-        let clear_color = match crate::quad_cull::base_clear(scene, size.width.0 as f32, size.height.0 as f32) {
++        // a damage-limited frame loads the old pixels, so the base quad is drawn, not turned into the clear
++        let clear_color = match self.damage.is_none().then(|| crate::quad_cull::base_clear(scene, size.width.0 as f32, size.height.0 as f32)).flatten() {
+             Some(c) => wgpu::Color { r: c.r as f64, g: c.g as f64, b: c.b as f64, a: c.a as f64 },
+             None => clear_color,
+         };
+@@ -1667,7 +1730,7 @@ impl WgpuRendererCore {
+                     view: frame_view,
+                     resolve_target: None,
+                     ops: wgpu::Operations {
+-                        load: wgpu::LoadOp::Clear(clear_color),
++                        load: if self.damage.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(clear_color) },
+                         store: wgpu::StoreOp::Store,
+                     },
+                     depth_slice: None,
+@@ -1675,6 +1738,9 @@ impl WgpuRendererCore {
+                 depth_stencil_attachment: None,
+                 ..Default::default()
+             });
++            if let Some(r) = self.damage {
++                pass.set_scissor_rect(r[0], r[1], r[2], r[3]);
++            }
+ 
+             for batch in scene.batches() {
+                 match batch {
+@@ -1742,6 +1808,9 @@ impl WgpuRendererCore {
+                             depth_stencil_attachment: None,
+                             ..Default::default()
+                         });
++                        if let Some(r) = self.damage {
++                            pass.set_scissor_rect(r[0], r[1], r[2], r[3]);
++                        }
+ 
+                         if rasterized {
+                             self.draw_paths_from_intermediate(
+@@ -1800,10 +1869,21 @@ impl WgpuRendererCore {
+             }
+         }
+ 
++        // a damage frame keeps the old pixels: wgpu-core's lazy clear of the acquired surface is dropped (vendor/wgpu-hal gles oc_damage)
++        #[cfg(target_os = "linux")]
++        let keep = self.damage.is_some();
++        #[cfg(target_os = "linux")]
++        if keep {
++            wgpu::hal::gles::oc_damage::KEEP.store(true, std::sync::atomic::Ordering::SeqCst);
++        }
+         let submission = self
+             .resources()
+             .queue
+             .submit(std::iter::once(encoder.finish()));
++        #[cfg(target_os = "linux")]
++        if keep {
++            wgpu::hal::gles::oc_damage::KEEP.store(false, std::sync::atomic::Ordering::SeqCst);
++        }
+         Ok(submission)
+     }
+ 
+@@ -2380,6 +2460,7 @@ impl WgpuRenderer {
+                 anyhow::bail!("Cannot replace the surface: GPU resources have been released")
+             }
+         };
++        self.prev_digest = None;
+         surface.configure(&core.resources.device, &self.surface_config);
+         core.resources.invalidate_intermediate_textures();
+         self.state = RendererState::Ready { surface, core };
