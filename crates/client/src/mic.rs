@@ -5,7 +5,9 @@
 //! cpal's `Stream` is !Send on macOS, so it lives on a dedicated thread that owns it; `on_chunk` is called on that thread
 //! (never on the real-time audio thread). `stop` flushes the last partial chunk, then returns once the thread is gone.
 use anyhow::{anyhow, bail};
+#[cfg(feature = "cpal")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "cpal")]
 use cpal::{FromSample, SizedSample};
 use parking_lot::Mutex;
 use std::sync::{mpsc, Arc};
@@ -21,6 +23,7 @@ pub struct MicChunk {
 const CHUNK: usize = 1600; // 100 ms at 16 kHz
 
 /// the worklet's downsampler, sample for sample
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 struct Down {
     ratio: f64,
     pos: f64,
@@ -29,6 +32,7 @@ struct Down {
     sq: f64,
     buf: Vec<i16>,
 }
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 impl Down {
     fn new(rate: u32) -> Self {
         Down { ratio: rate as f64 / 16_000.0, pos: 0.0, acc: 0.0, cnt: 0, sq: 0.0, buf: Vec::with_capacity(CHUNK) }
@@ -70,10 +74,20 @@ enum Msg {
 pub struct Mic {
     tx: mpsc::Sender<Msg>,
     thread: Option<JoinHandle<()>>,
+    /// the shell's own microphone (optchat_platform::Platform::mic) and its partial chunk
+    ext: Option<(Arc<dyn optchat_platform::MicSource>, Arc<Mutex<Vec<u8>>>)>,
+}
+
+/// a pcm16 chunk and its rms level (0..1)
+fn chunk_of(pcm: Vec<u8>) -> MicChunk {
+    let n = (pcm.len() / 2).max(1) as f64;
+    let sq: f64 = pcm.chunks(2).map(|b| { let v = i16::from_le_bytes([b[0], *b.get(1).unwrap_or(&0)]) as f64 / 32768.0; v * v }).sum();
+    MicChunk { level: (sq / n).sqrt() as f32, pcm }
 }
 
 /// macOS's microphone permission for this process (or the app that started it): None where unknown
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 fn authorization() -> Option<isize> {
     use std::ffi::{c_char, c_void, CStr};
     // AVCaptureDevice.authorizationStatus(for: .audio) through the Objective-C runtime, without a binding crate:
@@ -103,15 +117,23 @@ fn authorization() -> Option<isize> {
     }
 }
 #[cfg(not(target_os = "macos"))]
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 fn authorization() -> Option<isize> {
     None
 }
 
-/// whether there is a default input device
+/// whether there is a microphone: the shell's own, else a default input device
 pub fn input_available() -> bool {
-    cpal::default_host().default_input_device().is_some()
+    if optchat_platform::mic().is_some() {
+        return true;
+    }
+    #[cfg(feature = "cpal")]
+    return cpal::default_host().default_input_device().is_some();
+    #[cfg(not(feature = "cpal"))]
+    false
 }
 
+#[cfg(feature = "cpal")]
 fn stream_of<T>(device: &cpal::Device, config: &cpal::StreamConfig, down: Arc<Mutex<Down>>, tx: mpsc::Sender<Msg>) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: SizedSample + Send + 'static,
@@ -139,6 +161,7 @@ where
     )
 }
 
+#[cfg(feature = "cpal")]
 fn readable(e: impl std::fmt::Display) -> anyhow::Error {
     let s = e.to_string();
     let l = s.to_lowercase();
@@ -151,6 +174,7 @@ fn readable(e: impl std::fmt::Display) -> anyhow::Error {
     }
 }
 
+#[cfg(feature = "cpal")]
 fn open(down_tx: mpsc::Sender<Msg>) -> anyhow::Result<(cpal::Stream, Arc<Mutex<Down>>)> {
     let device = cpal::default_host().default_input_device().ok_or_else(|| anyhow!("no microphone found"))?;
     let supported = device.default_input_config().map_err(readable)?;
@@ -178,6 +202,46 @@ impl Mic {
     /// Starts recording from the default input device. Errors: "no microphone found", "microphone access is blocked"
     /// (macOS permission denied or restricted), "microphone failed: …".
     pub fn start(on_chunk: Arc<dyn Fn(MicChunk) + Send + Sync>) -> anyhow::Result<Mic> {
+        if let Some(src) = optchat_platform::mic() {
+            return Self::start_ext(src, on_chunk);
+        }
+        #[cfg(not(feature = "cpal"))]
+        bail!("no microphone found");
+        #[cfg(feature = "cpal")]
+        Self::start_cpal(on_chunk)
+    }
+
+    /// the shell's microphone: its pcm is cut into 100 ms chunks, delivered on our own thread like cpal's
+    fn start_ext(src: Arc<dyn optchat_platform::MicSource>, on_chunk: Arc<dyn Fn(MicChunk) + Send + Sync>) -> anyhow::Result<Mic> {
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let thread = std::thread::Builder::new()
+            .name("optchat-mic".into())
+            .spawn(move || {
+                while let Ok(Msg::Chunk(c)) = rx.recv() {
+                    on_chunk(c);
+                }
+            })
+            .map_err(|e| anyhow!("microphone failed: {e}"))?;
+        let buf = Arc::new(Mutex::new(Vec::<u8>::with_capacity(CHUNK * 2)));
+        let (b, t) = (buf.clone(), tx.clone());
+        let on_pcm: Arc<dyn Fn(&[u8]) + Send + Sync> = Arc::new(move |pcm: &[u8]| {
+            let mut g = b.lock();
+            g.extend_from_slice(pcm);
+            while g.len() >= CHUNK * 2 {
+                let rest = g.split_off(CHUNK * 2);
+                let _ = t.send(Msg::Chunk(chunk_of(std::mem::replace(&mut *g, rest))));
+            }
+        });
+        if let Err(e) = src.start(on_pcm) {
+            let _ = tx.send(Msg::Stop);
+            let _ = thread.join();
+            bail!("microphone failed: {e}");
+        }
+        Ok(Mic { tx, thread: Some(thread), ext: Some((src, buf)) })
+    }
+
+    #[cfg(feature = "cpal")]
+    fn start_cpal(on_chunk: Arc<dyn Fn(MicChunk) + Send + Sync>) -> anyhow::Result<Mic> {
         if let Some(1 | 2) = authorization() {
             bail!("microphone access is blocked");
         }
@@ -212,7 +276,7 @@ impl Mic {
             })
             .map_err(|e| anyhow!("microphone failed: {e}"))?;
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Mic { tx, thread: Some(thread) }),
+            Ok(Ok(())) => Ok(Mic { tx, thread: Some(thread), ext: None }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -230,6 +294,13 @@ impl Mic {
     }
 
     fn shutdown(&mut self) {
+        if let Some((src, buf)) = self.ext.take() {
+            src.stop(); // returns once the shell delivered its last audio
+            let rest = std::mem::take(&mut *buf.lock());
+            if !rest.is_empty() {
+                let _ = self.tx.send(Msg::Chunk(chunk_of(rest)));
+            }
+        }
         let _ = self.tx.send(Msg::Stop);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -269,6 +340,7 @@ mod tests {
         assert_eq!(d.buf, vec![-32768]);
     }
 
+    #[cfg(feature = "cpal")]
     #[test]
     fn enumerate_devices() {
         let host = cpal::default_host();
@@ -277,6 +349,7 @@ mod tests {
         assert_eq!(input_available(), host.default_input_device().is_some());
     }
 
+    #[cfg(feature = "cpal")]
     #[test]
     #[ignore = "records 1 s from the default microphone (needs permission)"]
     fn record_one_second() {

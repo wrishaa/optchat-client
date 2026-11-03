@@ -1,0 +1,14 @@
+diff --git a/crates/gpui_wgpu/src/wgpu_context.rs b/crates/gpui_wgpu/src/wgpu_context.rs
+index 4c55ef1..8facd28 100644
+--- a/crates/gpui_wgpu/src/wgpu_context.rs
++++ b/crates/gpui_wgpu/src/wgpu_context.rs
+@@ -685,7 +685,8 @@ impl WgpuContext {
+         let required_usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+         let bgra_features = adapter.get_texture_format_features(wgpu::TextureFormat::Bgra8Unorm);
+         let rgba_features = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm);
+-        #[cfg(target_family = "wasm")]
++        // GLES (webgl, and native gles like the samsung tizen tv's mali-g31) reports Bgra8Unorm as usable, but the
++        // upload is glTexSubImage2D(RGBA8 storage, BGRA data), which GLES mangles: images come out garbled. take Rgba8.
+         if adapter.get_info().backend == wgpu::Backend::Gl
+             && rgba_features.allowed_usages.contains(required_usages)
+         {

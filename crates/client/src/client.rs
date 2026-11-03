@@ -846,8 +846,22 @@ impl DictSession {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.release();
-        let _ = self.tx.send(WsMsg::text(json!({ "type": "stop" }).to_string()));
+        // the mic's stop waits for its last audio (a shell mic may keep a tail after the release): off the caller's
+        // thread, then "stop" goes out after that audio
+        self.fake_stop.store(true, Ordering::SeqCst);
+        let mic = self.mic.lock().take();
+        let tx = self.tx.clone();
+        let fin = move || {
+            if let Some(m) = mic {
+                m.stop();
+            }
+            let _ = tx.send(WsMsg::text(json!({ "type": "stop" }).to_string()));
+        };
+        if optchat_platform::mic().is_some() {
+            std::thread::spawn(fin);
+        } else {
+            fin();
+        }
         let _ = self.task;
     }
 }

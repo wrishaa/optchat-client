@@ -50,6 +50,11 @@ fn main() {
     // the macOS platform (Keychain, memory, the test QR "scanner" when OPTCHAT_TEST_QR is set): before anything
     // touches tokens
     optchat_platform::install(std::sync::Arc::new(crate::platform::Mac::new()));
+    // OPTCHAT_TV=1: the TV layout (crates/ui/src/tv.rs) in a 1280×720 window (the tv's 1080p at 1.5×), a fast stand-in for the tizen shell
+    let tv = std::env::var("OPTCHAT_TV").is_ok();
+    if tv {
+        optchat_ui::tv::enable();
+    }
     let prefs_path = prefs_path();
     test_bootstrap(&prefs_path);
     let rt: &'static tokio::runtime::Runtime = Box::leak(Box::new(tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("optchat-client").enable_all().build().expect("tokio runtime")));
@@ -83,10 +88,14 @@ fn main() {
             KeyBinding::new("cmd-/", workspace::ShowShortcuts, None),
         ]);
         set_menus(cx);
+        if tv {
+            tv::bind(cx);
+        }
 
         let state = state::new_state(cx, rt.handle().clone(), prefs_path.clone());
         // the last window bounds, when they are sane; else 1360×880 centered
         let bounds = match prefs.window {
+            _ if tv => Bounds::centered(None, size(px(1280.), px(720.)), cx), // the tv's layout size (1920×1080 at 1.5)
             Some([x, y, w, h]) if w >= 560. && h >= 420. && w < 10000. && h < 10000. && x > -5000. && y > -5000. => Bounds::new(point(px(x), px(y)), size(px(w), px(h))),
             _ => Bounds::centered(None, size(px(1360.), px(880.)), cx),
         };
@@ -106,6 +115,10 @@ fn main() {
                     theme::sync_window(window, cx);
                     let ws = cx.new(|cx| workspace::Workspace::new(st2.clone(), window, cx));
                     ws.update(cx, |w, cx| w.composer.update(cx, |c, cx| c.focus(window, cx)));
+                    if tv {
+                        let f = ws.read(cx).focus.clone();
+                        window.focus(&f, cx);
+                    }
                     ws
                 },
             )

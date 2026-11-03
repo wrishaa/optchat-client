@@ -19,7 +19,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 gpui_ios.workspace = true
 optchat-platform = { workspace = true, features = ["apple-keychain"] }
-optchat-client.workspace = true
+optchat-client = { workspace = true, features = ["cpal"] }
 optchat-ui.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

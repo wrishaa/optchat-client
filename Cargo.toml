@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/theme", "crates/platform", "crates/client", "crates/ui", "shells/mac", "shells/ios/app"]
+members = ["crates/proto", "crates/theme", "crates/platform", "crates/client", "crates/ui", "shells/mac", "shells/ios/app", "shells/tizen"]
 # `cargo build` at the root builds the shared crates and the macOS shell; the iOS shell is built by
 # shells/ios/app/build.sh (Xcode's script phase) for an iOS target.
 # vendor/zed is zed's own workspace (path deps under the root would otherwise join this one)
@@ -29,7 +29,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 optchat-proto = { path = "crates/proto" }
 optchat-theme = { path = "crates/theme" }
 optchat-platform = { path = "crates/platform" }
-optchat-client = { path = "crates/client" }
+optchat-client = { path = "crates/client", default-features = false } # shells pick "cpal" (the default input device)
 optchat-ui = { path = "crates/ui" }
 # GPUI: one pin for every platform. zed-industries/zed branch gpui-ios-platform (zed#63068) at 97dc71d; the crates
 # resolve to vendor/zed (below), a git submodule at that commit, with patches/zed/*.patch applied by tools/zed-vendor.sh.
@@ -64,6 +64,8 @@ ztracing_macro = { path = "vendor/zed/crates/ztracing_macro" }
 [patch.crates-io]
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+# optchat tizen tv poc: legacy eglGetDisplay(wl_display) path for drivers without EGL_EXT_platform_wayland (see egl.rs WaylandLegacy)
+wgpu-hal = { path = "shells/tizen/vendor/wgpu-hal" }
 
 [profile.dev]
 opt-level = 1

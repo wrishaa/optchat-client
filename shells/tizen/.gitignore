@@ -1,0 +1,4 @@
+host/bin/
+host/obj/
+host/lib/*.so
+host/shared/res/dev-seed.json
