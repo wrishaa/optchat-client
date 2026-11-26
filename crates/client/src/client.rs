@@ -136,6 +136,8 @@ pub struct EngineConn {
     next: AtomicU64,
     /// connected workspaces → (the task on screen there, the client token that connects it)
     subs: Mutex<HashMap<String, (i64, String)>>,
+    /// per workspace: the tasks its snapshots must carry even when done (the open tabs); see `connect_msg`
+    pins: Mutex<HashMap<String, Vec<i64>>>,
     stopped: AtomicBool,
     pub online: AtomicBool,
     pub reconnects: AtomicU64,
@@ -153,6 +155,7 @@ impl EngineConn {
             controls: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             subs: Mutex::new(HashMap::new()),
+            pins: Mutex::new(HashMap::new()),
             stopped: AtomicBool::new(false),
             online: AtomicBool::new(false),
             reconnects: AtomicU64::new(0),
@@ -191,7 +194,7 @@ impl EngineConn {
                     let (tx, mut rx) = mpsc::unbounded_channel::<WsMsg>();
                     // every connected workspace again: each answers hello + snapshot
                     for (ws, (task, token)) in self.subs.lock().iter() {
-                        let _ = tx.send(WsMsg::text(json!({ "type": "connect", "ws": ws, "task": task, "token": token }).to_string()));
+                        let _ = tx.send(WsMsg::text(self.connect_msg(ws, *task, token).to_string()));
                     }
                     *self.out.lock() = Some(tx);
                     let writer = tokio::spawn(async move {
@@ -336,9 +339,16 @@ impl EngineConn {
             None => Err("not connected to the engine".into()),
         }
     }
+    /// `tasks: "live"`: the snapshots carry only the tasks that are not done or canceled (plus `pin`, the open tabs,
+    /// and every ancestor), not the whole history: thousands of finished tasks were megabytes on every connect and
+    /// every task switch. The rest comes on demand (rpc tasks {ended: true}). An engine without it sends them all.
+    fn connect_msg(&self, ws: &str, task: i64, token: &str) -> Value {
+        let pin = self.pins.lock().get(ws).cloned().unwrap_or_default();
+        json!({ "type": "connect", "ws": ws, "task": task, "token": token, "tasks": "live", "pin": pin })
+    }
     pub fn connect_ws(&self, ws: &str, task: i64, token: &str) {
         self.subs.lock().insert(ws.to_string(), (task, token.to_string()));
-        let _ = self.send_json(json!({ "type": "connect", "ws": ws, "task": task, "token": token }));
+        let _ = self.send_json(self.connect_msg(ws, task, token));
     }
     pub fn disconnect_ws(&self, ws: &str) {
         self.subs.lock().remove(ws);
@@ -398,7 +408,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(conn: Arc<EngineConn>, ws: &str, task: i64, token: &str) -> Arc<Client> {
+    pub fn new(conn: Arc<EngineConn>, ws: &str, task: i64, token: &str, pin: Vec<i64>) -> Arc<Client> {
+        conn.pins.lock().insert(ws.to_string(), pin);
         conn.connect_ws(ws, task, token);
         Arc::new(Client { conn, ws: ws.to_string(), token: Mutex::new(token.to_string()), task: AtomicI64::new(task), dict: Mutex::new(None) })
     }
@@ -529,13 +540,30 @@ impl Client {
         self.control_msg(m).await.map(|r| r.0)
     }
 
+    /// the tasks this workspace's snapshots carry even when done (the open tabs): sent with the next open / connect
+    pub fn set_pin(&self, pin: Vec<i64>) {
+        self.conn.pins.lock().insert(self.ws.clone(), pin);
+    }
     /// show this task: the hub answers with its snapshot (a HubEvent::Snapshot)
     pub fn open(&self, task: i64) {
         self.task.store(task, Ordering::SeqCst);
         if let Some(s) = self.conn.subs.lock().get_mut(&self.ws) {
             s.0 = task;
         }
-        let _ = self.send_json(json!({ "type": "open", "task": task }));
+        let pin = self.conn.pins.lock().get(&self.ws).cloned().unwrap_or_default();
+        let _ = self.send_json(json!({ "type": "open", "task": task, "pin": pin }));
+    }
+    /// a page of done and canceled tasks under `under` (its subtree), newest first, before the id `before`; with their
+    /// ancestors. (tasks, more, next before). An engine that does not page answers with every task (more: false).
+    pub async fn tasks_ended(&self, under: i64, before: Option<i64>, limit: usize) -> Result<(Vec<TaskInfo>, bool, Option<i64>), String> {
+        let mut p = json!({ "ended": true, "under": under, "limit": limit });
+        if let Some(b) = before {
+            p["before"] = json!(b);
+        }
+        let r = self.rpc("tasks", p).await?;
+        let list = r.get("tasks").and_then(|t| t.as_array()).or_else(|| r.as_array());
+        let tasks = list.map(|a| a.iter().filter_map(TaskInfo::parse).collect()).unwrap_or_default();
+        Ok((tasks, r["more"].as_bool().unwrap_or(false), r["before"].as_i64()))
     }
 
     pub fn images_json(images: Vec<ImageIn>) -> Value {

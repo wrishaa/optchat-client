@@ -68,6 +68,9 @@ pub struct WsPrefs {
     pub view: View,
     pub side_open: bool,
     pub task_scope_all: bool,
+    /// done and canceled tasks in the Tasks view: hidden by default (a new key: the old `show_ended` was on by default
+    /// and thousands of finished rows hung the phone)
+    #[serde(rename = "show_done")]
     pub show_ended: bool,
     pub settings_tab_global: bool,
     pub tabs: Vec<i64>,
@@ -75,7 +78,7 @@ pub struct WsPrefs {
 }
 impl Default for WsPrefs {
     fn default() -> Self {
-        WsPrefs { view: View::Tasks, side_open: true, task_scope_all: false, show_ended: true, settings_tab_global: false, tabs: vec![0], current: 0 }
+        WsPrefs { view: View::Tasks, side_open: true, task_scope_all: false, show_ended: false, settings_tab_global: false, tabs: vec![0], current: 0 }
     }
 }
 
@@ -94,6 +97,7 @@ pub struct Prefs {
     pub side_open: bool,
     pub side_w: f32,
     pub task_scope_all: bool,
+    #[serde(rename = "show_done")]
     pub show_ended: bool,
     pub settings_tab_global: bool,
     pub theme: Option<String>,
@@ -104,7 +108,7 @@ pub struct Prefs {
 }
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { engines: vec![], connections: vec![], active: None, ws: BTreeMap::new(), window: None, view: View::Tasks, side_open: true, side_w: 320.0, task_scope_all: false, show_ended: true, settings_tab_global: false, theme: None, follow_system: true, tabs: vec![0], current: 0, font_size: 14.0 }
+        Prefs { engines: vec![], connections: vec![], active: None, ws: BTreeMap::new(), window: None, view: View::Tasks, side_open: true, side_w: 320.0, task_scope_all: false, show_ended: false, settings_tab_global: false, theme: None, follow_system: true, tabs: vec![0], current: 0, font_size: 14.0 }
     }
 }
 
@@ -159,6 +163,25 @@ pub struct Dict {
     pub error: Option<(String, std::time::Instant)>,
 }
 
+/// The done and canceled tasks of a workspace whose engine sends only the live ones (`tasks: "live"`): how many it left
+/// out, and the pages loaded so far (per subtree root: more to come, the id to continue before).
+#[derive(Clone, Debug, Default)]
+pub struct Ended {
+    /// the last snapshot carried only the live tasks
+    pub live: bool,
+    /// how many tasks that snapshot left out
+    pub hidden: usize,
+    pub loading: bool,
+    /// subtree root -> (more pages, continue before this id)
+    pub pages: HashMap<i64, (bool, Option<i64>)>,
+    pub error: Option<String>,
+    /// an engine that sends every task: how many of the newest done ones the Tasks view shows (a page more per
+    /// "Load older done tasks"), so thousands of rows never render at once
+    pub shown: usize,
+}
+/// done tasks per page (the engine's page, or the rows shown of an engine that sent them all)
+pub const ENDED_PAGE: usize = 300;
+
 /// A connected workspace's state while another one is on screen (swapped with AppState's fields on a switch; its
 /// events keep being applied to it, quietly).
 pub struct WsData {
@@ -183,6 +206,7 @@ pub struct WsData {
     pub pinned_request: bool,
     pub notices: Vec<Notice>,
     pub notices_loaded: bool,
+    pub ended: Ended,
     pub wp: WsPrefs,
 }
 impl WsData {
@@ -209,6 +233,7 @@ impl WsData {
             pinned_request: false,
             notices: vec![],
             notices_loaded: false,
+            ended: Ended::default(),
             wp,
         }
     }
@@ -262,6 +287,8 @@ pub struct AppState {
     pub rt: tokio::runtime::Handle,
     pub error: Option<String>,
     pub tasks: BTreeMap<i64, TaskInfo>,
+    /// done and canceled tasks loaded on demand (an engine that sends only the live ones)
+    pub ended: Ended,
     pub current: i64,
     pub cur: Cur,
     pub models: Vec<ModelInfo>,
@@ -335,6 +362,7 @@ impl AppState {
             rt,
             error: None,
             tasks: BTreeMap::new(),
+            ended: Ended::default(),
             current: prefs.current,
             cur: Cur::default(),
             models: vec![],
@@ -491,7 +519,7 @@ impl AppState {
     /// a connection as a background workspace (subscribed at once); without a token it stays listed, unconnected
     fn attach_ws(&mut self, endpoint: &str, ws: &str, wp: WsPrefs, token: Option<String>, _cx: &mut Context<Self>) {
         let key = ws_key(endpoint, ws);
-        let hub = token.as_deref().and_then(|t| self.conn_for(endpoint).map(|c| Client::new(c, ws, wp.current, t)));
+        let hub = token.as_deref().and_then(|t| self.conn_for(endpoint).map(|c| Client::new(c, ws, wp.current, t, wp.tabs.clone())));
         self.meta.insert(key.clone(), WsMeta { endpoint: endpoint.into(), ws: ws.into(), unread: Unread::default(), conn: Conn::Connecting, disabled: None, no_token: hub.is_none(), refused: None });
         self.bg.insert(key, WsData::new(hub, wp));
     }
@@ -717,6 +745,7 @@ impl AppState {
         swap(&mut self.instance, &mut d.instance);
         swap(&mut self.computer_available, &mut d.computer_available);
         swap(&mut self.tasks, &mut d.tasks);
+        swap(&mut self.ended, &mut d.ended);
         swap(&mut self.current, &mut d.current);
         swap(&mut self.cur, &mut d.cur);
         swap(&mut self.models, &mut d.models);
@@ -982,9 +1011,73 @@ impl AppState {
         // the hub answers "open" with this task's snapshot (applied in `apply`)
         self.stats.switch_t0 = Some(std::time::Instant::now());
         if let Some(c) = &self.hub {
+            c.set_pin(self.prefs.tabs.clone());
             c.open(id);
         }
         cx.notify();
+    }
+
+    /// The subtree whose done and canceled tasks the Tasks view shows: every task, or the current one's.
+    pub fn ended_root(&self) -> i64 {
+        if self.prefs.task_scope_all { 0 } else { self.current }
+    }
+    /// Show or hide done and canceled tasks (the Tasks view's toggle); showing loads their first page when the engine
+    /// sent only the live tasks.
+    pub fn set_show_done(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.prefs.show_ended = on;
+        self.save_prefs();
+        if on {
+            self.ensure_ended(cx);
+        }
+        cx.notify();
+    }
+    /// the first page of done and canceled tasks under the view's root, unless loaded (or nothing is left out)
+    pub fn ensure_ended(&mut self, cx: &mut Context<Self>) {
+        if !self.prefs.show_ended || !self.ended.live || self.ended.pages.contains_key(&self.ended_root()) {
+            return;
+        }
+        self.load_ended(cx);
+    }
+    /// the next page of done and canceled tasks under the view's root (300 at a time, newest first)
+    pub fn load_ended(&mut self, cx: &mut Context<Self>) {
+        if !self.ended.live {
+            // every task is here already: show a page more of them
+            self.ended.shown = self.ended.shown.max(ENDED_PAGE) + ENDED_PAGE;
+            cx.notify();
+            return;
+        }
+        if self.ended.loading {
+            return;
+        }
+        let under = self.ended_root();
+        let before = self.ended.pages.get(&under).and_then(|p| p.1);
+        if self.ended.pages.get(&under).is_some_and(|p| !p.0) {
+            return;
+        }
+        self.ended.loading = true;
+        self.ended.error = None;
+        let key = self.active.clone();
+        let t0 = std::time::Instant::now();
+        self.run(cx, move |h| async move { h.tasks_ended(under, before, 300).await }, move |s, r, _| {
+            if s.active != key {
+                return; // another workspace is on screen now: its own toggle loads its own
+            }
+            s.ended.loading = false;
+            match r {
+                Ok((tasks, more, next)) => {
+                    let n = tasks.len();
+                    for t in tasks {
+                        // a live update may be newer than the page: keep what is here
+                        s.tasks.entry(t.task.id).or_insert(t);
+                    }
+                    s.ended.pages.insert(under, (more, next));
+                    if std::env::var("OPTCHAT_TIMING").is_ok() {
+                        eprintln!("ended tasks under #{under}: {n} in {:.1} ms (more: {more})", t0.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
+                Err(e) => s.ended.error = Some(e),
+            }
+        });
     }
 
     /// older entries from the hub before the loaded ones (the page's olderLog); returns how many were added
@@ -1050,7 +1143,27 @@ impl AppState {
         if self.server_log.is_empty() {
             self.server_log = s.server_log.iter().cloned().collect();
         }
-        self.tasks = s.tasks.iter().cloned().map(|i| (i.task.id, i)).collect();
+        let fresh: BTreeMap<i64, TaskInfo> = s.tasks.iter().cloned().map(|i| (i.task.id, i)).collect();
+        if s.tasks_live {
+            // only the live tasks came: the done ones loaded on demand stay (their pages too); a task that was live here
+            // and is not in the list any more ended meanwhile, so it goes (a page brings it back)
+            let old = std::mem::take(&mut self.tasks);
+            self.tasks = fresh;
+            if self.ended.live {
+                for (id, x) in old {
+                    if x.task.status.terminal() {
+                        self.tasks.entry(id).or_insert(x);
+                    }
+                }
+            } else {
+                self.ended.pages.clear();
+            }
+            self.ended.live = true;
+            self.ended.hidden = s.tasks_hidden;
+        } else {
+            self.tasks = fresh;
+            self.ended = Ended { shown: self.ended.shown, ..Ended::default() };
+        }
         let mut turns: HashMap<String, TurnRecord> = s.turns.into_iter().map(|t| (t.id.clone(), t)).collect();
         if let Some(r) = &s.running {
             turns.insert(r.id.clone(), r.clone());
@@ -1283,15 +1396,18 @@ impl AppState {
                 // the server is the truth after a (re)connect or an open; another task's snapshot is a stale answer,
                 // unless the task asked for is gone (the hub then shows the main chat)
                 let mut cur = cur;
+                // a live-only list may leave out a done task that is still here (opened from the done list)
+                let known = |id: i64, s: &AppState| snap.tasks.iter().any(|t| t.task.id == id) || (snap.tasks_live && s.tasks.contains_key(&id));
                 if snap.task != cur {
-                    if snap.tasks.iter().any(|t| t.task.id == cur) {
+                    if known(cur, self) {
                         return;
                     }
                     cur = snap.task;
                     self.current = cur;
                     self.prefs.current = cur;
                 }
-                self.prefs.tabs.retain(|t| snap.tasks.iter().any(|x| x.task.id == *t));
+                let tabs: Vec<i64> = self.prefs.tabs.iter().copied().filter(|t| known(*t, self)).collect();
+                self.prefs.tabs = tabs;
                 if !self.prefs.tabs.contains(&cur) {
                     self.prefs.tabs.push(cur);
                 }
@@ -1301,6 +1417,8 @@ impl AppState {
                 if self.quiet {
                     return;
                 }
+                // "show done" on: this task's subtree (This Task) needs its done tasks too
+                self.ensure_ended(cx);
                 if let Some(t0) = self.stats.switch_t0 {
                     if std::env::var("OPTCHAT_TIMING").is_ok() {
                         eprintln!("open #{cur}: snapshot applied at {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);

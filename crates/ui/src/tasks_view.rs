@@ -43,6 +43,69 @@ impl TasksPanel {
     }
 }
 
+/// parent -> the children that may show, in id order, built in one pass over the tasks (the tree walk asked
+/// `children_of`, a scan of every task, per node and per row: thousands of tasks made that quadratic)
+fn child_index<'a>(s: &'a AppState, keep: impl Fn(&TaskInfo) -> bool) -> std::collections::HashMap<i64, Vec<&'a TaskInfo>> {
+    let mut m: std::collections::HashMap<i64, Vec<&TaskInfo>> = std::collections::HashMap::new();
+    for x in s.tasks.values() {
+        if let Some(p) = x.task.parent {
+            if keep(x) {
+                m.entry(p).or_default().push(x);
+            }
+        }
+    }
+    m
+}
+
+/// the rows the Tasks view shows, top to bottom: (task, depth, on the path above the current task, children shown).
+/// Done and canceled tasks are hidden unless "show done" is on, except the current one and its ancestors.
+pub fn visible_rows(s: &AppState, collapsed: &std::collections::HashSet<i64>) -> Vec<(TaskInfo, usize, bool, usize)> {
+    let show_ended = s.prefs.show_ended;
+    let cur = s.current;
+    let up: std::collections::HashSet<i64> = s.ancestors(cur).iter().map(|a| a.task.id).collect();
+    // an engine that sent every task: only the newest done ones (a page at a time) and their ancestors
+    let cap: Option<std::collections::HashSet<i64>> = (show_ended && !s.ended.live).then(|| {
+        let mut ended: Vec<i64> = s.tasks.values().filter(|x| x.task.status.terminal()).map(|x| x.task.id).collect();
+        ended.sort_unstable_by(|a, b| b.cmp(a));
+        ended.truncate(s.ended.shown.max(ENDED_PAGE));
+        let mut keep: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for id in ended {
+            let mut x = Some(id);
+            while let Some(i) = x {
+                if !keep.insert(i) {
+                    break;
+                }
+                x = s.tasks.get(&i).and_then(|t| t.task.parent);
+            }
+        }
+        keep
+    });
+    let idx = child_index(s, |c| !c.task.status.terminal() || c.task.id == cur || up.contains(&c.task.id) || (show_ended && cap.as_ref().is_none_or(|k| k.contains(&c.task.id))));
+    let mut rows: Vec<(TaskInfo, usize, bool, usize)> = vec![];
+    fn walk(s: &AppState, idx: &std::collections::HashMap<i64, Vec<&TaskInfo>>, closed: &std::collections::HashSet<i64>, id: i64, depth: usize, out: &mut Vec<(TaskInfo, usize, bool, usize)>) {
+        let Some(x) = s.tasks.get(&id) else { return };
+        let kids = idx.get(&id).map(|v| v.as_slice()).unwrap_or(&[]);
+        out.push((x.clone(), depth, false, kids.len()));
+        if closed.contains(&id) {
+            return;
+        }
+        for c in kids {
+            walk(s, idx, closed, c.task.id, depth + 1, out);
+        }
+    }
+    if s.prefs.task_scope_all {
+        walk(s, &idx, collapsed, 0, 0, &mut rows);
+    } else {
+        let up = s.ancestors(cur);
+        let n = up.len();
+        for (d, x) in up.into_iter().enumerate() {
+            rows.push((x.clone(), d, true, 0));
+        }
+        walk(s, &idx, collapsed, cur, n, &mut rows);
+    }
+    rows
+}
+
 pub fn render(w: &mut TasksPanel, _window: &mut Window, cx: &mut Context<TasksPanel>) -> impl IntoElement {
     let k = c(cx).clone();
     let s = w.state.read(cx);
@@ -50,52 +113,74 @@ pub fn render(w: &mut TasksPanel, _window: &mut Window, cx: &mut Context<TasksPa
     if s.tasks.get(&s.current).is_none() || s.tasks.get(&0).is_none() {
         return list.child(skeleton_line(None, cx)).child(skeleton_line(Some(160.), cx)).child(skeleton_line(None, cx));
     }
-    let mut rows: Vec<(TaskInfo, usize, bool)> = vec![];
-    let show_ended = s.prefs.show_ended;
+    let t0 = std::time::Instant::now();
     let cur = s.current;
-    fn walk(s: &AppState, id: i64, depth: usize, closed: &std::collections::HashSet<i64>, show_ended: bool, cur: i64, out: &mut Vec<(TaskInfo, usize, bool)>) {
-        let Some(x) = s.tasks.get(&id) else { return };
-        out.push((x.clone(), depth, false));
-        if closed.contains(&id) {
-            return;
-        }
-        for c in s.children_of(id) {
-            if show_ended || !c.task.status.terminal() || c.task.id == cur {
-                walk(s, c.task.id, depth + 1, closed, show_ended, cur, out);
-            }
-        }
-    }
-    if s.prefs.task_scope_all {
-        walk(s, 0, 0, &w.collapsed, show_ended, cur, &mut rows);
-    } else {
-        let up = s.ancestors(cur);
-        let n = up.len();
-        for (d, x) in up.into_iter().enumerate() {
-            rows.push((x.clone(), d, true));
-        }
-        walk(s, cur, n, &w.collapsed, show_ended, cur, &mut rows);
-    }
-    let no_kids = s.children_of(cur).is_empty();
-    let up_n = if s.prefs.task_scope_all { 0 } else { s.ancestors(cur).len() };
+    let rows = visible_rows(s, &w.collapsed);
     let scope_all = s.prefs.task_scope_all;
-    set_state_extra("tasksPanel", serde_json::json!({ "rows": rows.len(), "noKids": no_kids && !scope_all, "collapsed": w.collapsed.iter().collect::<Vec<_>>() }));
-    for (x, depth, path) in rows {
-        list = list.child(row(w, &x, depth, path, cx));
+    let up_n = if scope_all { 0 } else { s.ancestors(cur).len() };
+    // the current task (This Task) shows no children: it has none, or only done ones that are hidden
+    let shown_kids = rows.iter().find(|r| r.0.task.id == cur && !r.2).map_or(0, |r| r.3);
+    let known_kids = s.tasks.values().any(|x| x.task.parent == Some(cur));
+    let show_done = s.prefs.show_ended;
+    let ended = s.ended.clone();
+    let no_kids = !scope_all && shown_kids == 0 && !known_kids && (show_done || !ended.live);
+    let hidden_kids = !scope_all && shown_kids == 0 && !no_kids && !show_done;
+    // "show done" with an engine that sends only the live tasks: the next page, or that it is loading
+    let page = ended.pages.get(&s.ended_root()).copied();
+    // more done tasks to show: the engine's next page, or (an engine that sent them all) the next rows of those here
+    let more = if ended.live { page.is_some_and(|p| p.0) } else { show_done && s.tasks.values().filter(|x| x.task.status.terminal()).count() > ended.shown.max(ENDED_PAGE) };
+    set_state_extra("tasksPanel", serde_json::json!({ "rows": rows.len(), "noKids": no_kids, "collapsed": w.collapsed.iter().collect::<Vec<_>>(), "tasks": s.tasks.len(), "showDone": show_done, "endedLive": ended.live, "endedHidden": ended.hidden, "endedLoading": ended.loading, "endedMore": more }));
+    let n_rows = rows.len();
+    for (x, depth, path, kids) in rows {
+        list = list.child(row(w, &x, depth, path, kids, cx));
     }
-    if no_kids && !scope_all {
+    if no_kids {
         list = list.child(div().pl(px(40. + up_n as f32 * 14.)).py(px(6.)).text_size(px(12.)).text_color(k.faint).child("no subtasks yet").child(probe("tasks.nokids")));
+    } else if hidden_kids {
+        list = list.child(div().pl(px(40. + up_n as f32 * 14.)).py(px(6.)).text_size(px(12.)).text_color(k.faint).child("no live subtasks (done ones hidden)").child(probe("tasks.hiddenkids")));
+    }
+    // more done tasks to show: the engine's next page, or (an engine that sent them all) the next rows of those here
+    if show_done {
+        let note = |t: String| div().px(px(10.)).py(px(10.)).text_size(px(12.5)).text_color(k.faint).child(t);
+        if ended.loading {
+            list = list.child(note("loading done tasks…".into()).child(probe("tasks.endedLoading")));
+        } else if let Some(e) = &ended.error {
+            list = list.child(note(format!("could not load done tasks: {e}")));
+        } else if more {
+            let hover = k.hover;
+            list = list.child(
+                div()
+                    .id("tasks-more-done")
+                    .mx(px(4.))
+                    .my(px(6.))
+                    .py(px(10.))
+                    .rounded(px(8.))
+                    .flex()
+                    .justify_center()
+                    .text_size(px(13.))
+                    .text_color(k.accent)
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(hover))
+                    .child("Load older done tasks")
+                    .child(probe("tasks.moreDone"))
+                    .on_click(cx.listener(|w, _, _, cx| w.state.update(cx, |s, cx| s.load_ended(cx)))),
+            );
+        }
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var("OPTCHAT_TIMING").is_ok() && ms > 4.0 {
+        eprintln!("tasks view: {n_rows} rows of {} tasks in {ms:.1} ms", w.state.read(cx).tasks.len());
     }
     list
 }
 
-fn row(w: &TasksPanel, x: &TaskInfo, depth: usize, path: bool, cx: &mut Context<TasksPanel>) -> impl IntoElement {
+fn row(w: &TasksPanel, x: &TaskInfo, depth: usize, path: bool, kids: usize, cx: &mut Context<TasksPanel>) -> impl IntoElement {
     let k = c(cx).clone();
     let s = w.state.read(cx);
     let t = &x.task;
     let id = t.id;
     let is_cur = id == s.current;
     let ended = t.status.terminal();
-    let kids = if path { 0 } else { s.children_of(id).iter().filter(|c| s.prefs.show_ended || !c.task.status.terminal() || c.task.id == s.current).count() };
     let open = !w.collapsed.contains(&id);
     let usd = sub(Some(x), "usd");
     let active = sub(Some(x), "time.active");
