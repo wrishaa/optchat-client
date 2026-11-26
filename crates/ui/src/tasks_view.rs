@@ -63,7 +63,24 @@ pub fn visible_rows(s: &AppState, collapsed: &std::collections::HashSet<i64>) ->
     let show_ended = s.prefs.show_ended;
     let cur = s.current;
     let up: std::collections::HashSet<i64> = s.ancestors(cur).iter().map(|a| a.task.id).collect();
-    let idx = child_index(s, |c| show_ended || !c.task.status.terminal() || c.task.id == cur || up.contains(&c.task.id));
+    // an engine that sent every task: only the newest done ones (a page at a time) and their ancestors
+    let cap: Option<std::collections::HashSet<i64>> = (show_ended && !s.ended.live).then(|| {
+        let mut ended: Vec<i64> = s.tasks.values().filter(|x| x.task.status.terminal()).map(|x| x.task.id).collect();
+        ended.sort_unstable_by(|a, b| b.cmp(a));
+        ended.truncate(s.ended.shown.max(ENDED_PAGE));
+        let mut keep: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for id in ended {
+            let mut x = Some(id);
+            while let Some(i) = x {
+                if !keep.insert(i) {
+                    break;
+                }
+                x = s.tasks.get(&i).and_then(|t| t.task.parent);
+            }
+        }
+        keep
+    });
+    let idx = child_index(s, |c| !c.task.status.terminal() || c.task.id == cur || up.contains(&c.task.id) || (show_ended && cap.as_ref().is_none_or(|k| k.contains(&c.task.id))));
     let mut rows: Vec<(TaskInfo, usize, bool, usize)> = vec![];
     fn walk(s: &AppState, idx: &std::collections::HashMap<i64, Vec<&TaskInfo>>, closed: &std::collections::HashSet<i64>, id: i64, depth: usize, out: &mut Vec<(TaskInfo, usize, bool, usize)>) {
         let Some(x) = s.tasks.get(&id) else { return };
@@ -110,7 +127,9 @@ pub fn render(w: &mut TasksPanel, _window: &mut Window, cx: &mut Context<TasksPa
     let hidden_kids = !scope_all && shown_kids == 0 && !no_kids && !show_done;
     // "show done" with an engine that sends only the live tasks: the next page, or that it is loading
     let page = ended.pages.get(&s.ended_root()).copied();
-    set_state_extra("tasksPanel", serde_json::json!({ "rows": rows.len(), "noKids": no_kids, "collapsed": w.collapsed.iter().collect::<Vec<_>>(), "tasks": s.tasks.len(), "showDone": show_done, "endedLive": ended.live, "endedHidden": ended.hidden, "endedLoading": ended.loading, "endedMore": page.map(|p| p.0) }));
+    // more done tasks to show: the engine's next page, or (an engine that sent them all) the next rows of those here
+    let more = if ended.live { page.is_some_and(|p| p.0) } else { show_done && s.tasks.values().filter(|x| x.task.status.terminal()).count() > ended.shown.max(ENDED_PAGE) };
+    set_state_extra("tasksPanel", serde_json::json!({ "rows": rows.len(), "noKids": no_kids, "collapsed": w.collapsed.iter().collect::<Vec<_>>(), "tasks": s.tasks.len(), "showDone": show_done, "endedLive": ended.live, "endedHidden": ended.hidden, "endedLoading": ended.loading, "endedMore": more }));
     let n_rows = rows.len();
     for (x, depth, path, kids) in rows {
         list = list.child(row(w, &x, depth, path, kids, cx));
@@ -120,13 +139,14 @@ pub fn render(w: &mut TasksPanel, _window: &mut Window, cx: &mut Context<TasksPa
     } else if hidden_kids {
         list = list.child(div().pl(px(40. + up_n as f32 * 14.)).py(px(6.)).text_size(px(12.)).text_color(k.faint).child("no live subtasks (done ones hidden)").child(probe("tasks.hiddenkids")));
     }
-    if show_done && ended.live {
+    // more done tasks to show: the engine's next page, or (an engine that sent them all) the next rows of those here
+    if show_done {
         let note = |t: String| div().px(px(10.)).py(px(10.)).text_size(px(12.5)).text_color(k.faint).child(t);
         if ended.loading {
             list = list.child(note("loading done tasks…".into()).child(probe("tasks.endedLoading")));
         } else if let Some(e) = &ended.error {
             list = list.child(note(format!("could not load done tasks: {e}")));
-        } else if page.is_some_and(|p| p.0) {
+        } else if more {
             let hover = k.hover;
             list = list.child(
                 div()

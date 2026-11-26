@@ -175,7 +175,12 @@ pub struct Ended {
     /// subtree root -> (more pages, continue before this id)
     pub pages: HashMap<i64, (bool, Option<i64>)>,
     pub error: Option<String>,
+    /// an engine that sends every task: how many of the newest done ones the Tasks view shows (a page more per
+    /// "Load older done tasks"), so thousands of rows never render at once
+    pub shown: usize,
 }
+/// done tasks per page (the engine's page, or the rows shown of an engine that sent them all)
+pub const ENDED_PAGE: usize = 300;
 
 /// A connected workspace's state while another one is on screen (swapped with AppState's fields on a switch; its
 /// events keep being applied to it, quietly).
@@ -1035,6 +1040,12 @@ impl AppState {
     }
     /// the next page of done and canceled tasks under the view's root (300 at a time, newest first)
     pub fn load_ended(&mut self, cx: &mut Context<Self>) {
+        if !self.ended.live {
+            // every task is here already: show a page more of them
+            self.ended.shown = self.ended.shown.max(ENDED_PAGE) + ENDED_PAGE;
+            cx.notify();
+            return;
+        }
         if self.ended.loading {
             return;
         }
@@ -1151,7 +1162,7 @@ impl AppState {
             self.ended.hidden = s.tasks_hidden;
         } else {
             self.tasks = fresh;
-            self.ended = Ended::default();
+            self.ended = Ended { shown: self.ended.shown, ..Ended::default() };
         }
         let mut turns: HashMap<String, TurnRecord> = s.turns.into_iter().map(|t| (t.id.clone(), t)).collect();
         if let Some(r) = &s.running {

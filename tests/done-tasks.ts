@@ -43,11 +43,21 @@ try {
   await shot("01-chat");
 
   // the Tasks screen, All Tasks: the done ones hidden by default
+  const tTasks = Date.now();
   await a.click("phone.tab.tasks");
-  await sleep(600);
+  await a.waitFor(() => !!a.probe("trow.0"), 30000, "tasks screen");
+  out.tasksScreenMs = Date.now() - tTasks;
+  const tAll = Date.now();
   if (a.probe("phone.seg.all")) await a.click("phone.seg.all");
   else await a.clickAt(110, 160); // an older build: no probe on the segment
-  await sleep(800);
+  await sleep(300);
+  out.allTasksMs = Date.now() - tAll;
+  // scrolling the list: each test command returns when the app has handled it (a hung main thread shows here)
+  const tScroll = Date.now();
+  for (let i = 0; i < 6; i++) await a.cmd({ op: "scroll", x: 200, y: 500, dy: i < 3 ? -1500 : 1500 });
+  out.scroll6Ms = Date.now() - tScroll;
+  await a.cmd({ op: "scroll", x: 200, y: 500, dy: 20000 });
+  await sleep(500);
   const rows0 = Object.keys(a.allProbes()).filter((k) => /^trow\.\d+$/.test(k)).length;
   out.rowsDefault = tp().rows ?? rows0;
   out.framesTasks = st().frames;
@@ -75,12 +85,12 @@ try {
       out.moreButtonAt = a.probe("tasks.moreDone");
       await sleep(300);
       await shot("04-load-more-button");
-      const before = tp().tasks;
+      const before = tp().rows;
       await a.click("tasks.moreDone");
-      await a.waitFor(() => tp().endedLoading === false && tp().tasks > before, 20000, "second page");
+      await a.waitFor(() => tp().endedLoading === false && tp().rows > before, 20000, "second page");
       out.tasksAfterPage2 = tp().tasks;
       out.rowsPage2 = tp().rows;
-      check(tp().tasks > before, `Load older done tasks: ${before} -> ${tp().tasks} tasks`);
+      check(tp().rows > before, `Load older done tasks: ${before} -> ${tp().rows} rows (${tp().tasks} tasks in the client)`);
       await shot("05-page-2");
     }
     // open a done task from the list (a tap on its row): its chat loads; the tab stays after the next snapshot
@@ -109,7 +119,8 @@ try {
     await shot("07-hidden-again");
   }
 
-  // live updates: a task spawned on the engine shows up in the list
+  // live updates: a task spawned on the engine shows up in the list (never on a real workspace: OC_READONLY=1)
+  if (Deno.env.get("OC_READONLY")) { out.rssEnd = st().rss; Deno.writeTextFileSync("/tmp/oc-done-step", "end"); throw "readonly"; }
   const ws = new WebSocket(ENGINE.replace(/^http/, "ws") + "/engine/ws", { headers: { Authorization: `Bearer ${token}`, Origin: ENGINE } } as never);
   await new Promise((r) => ws.onopen = r);
   ws.send(JSON.stringify({ type: "connect", ws: WS, task: 0, token, tasks: "live" }));
@@ -126,7 +137,7 @@ try {
   Deno.writeTextFileSync("/tmp/oc-done-step", "end");
   out.frames = st().frames;
 } catch (e) {
-  check(false, `error: ${e}`);
+  if (e !== "readonly") check(false, `error: ${e}`);
 } finally {
   try { out.stderrTiming = Deno.readTextFileSync(`${dir}/stderr.txt`).split("\n").filter((l) => /ms|snapshot|ended|tasks view/.test(l)).slice(-15); } catch { /* */ }
   console.log(JSON.stringify(out));
