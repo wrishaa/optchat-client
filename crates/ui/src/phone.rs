@@ -507,6 +507,9 @@ fn screen_view(w: &mut Workspace, scr: Screen, window: &mut Window, cx: &mut Con
     };
     let s = w.state.read(cx);
     let scope_all = s.prefs.task_scope_all;
+    let show_done = s.prefs.show_ended;
+    // how many done and canceled tasks are hidden: the engine's count when it sent only the live ones, else ours
+    let hidden = if s.ended.live { s.ended.hidden } else { s.tasks.values().filter(|x| x.task.status.terminal()).count() };
     let action: Option<AnyElement> = match scr {
         Screen::Panel(View::Tasks) => Some(icon_btn("ph-new", "plus", 20., cx).child(probe("phone.new")).on_click(cx.listener(|w, _, window, cx| crate::dialogs::open_new_task(w, None, window, cx))).into_any_element()),
         _ => None,
@@ -525,10 +528,12 @@ fn screen_view(w: &mut Workspace, scr: Screen, window: &mut Window, cx: &mut Con
             .when(on, |d| d.bg(kk.selected).text_color(kk.text))
             .when(!on, |d| d.text_color(kk.muted))
             .child(label)
+            .child(probe(if val { "phone.seg.all" } else { "phone.seg.this" }))
             .on_click(cx.listener(move |w, _, _, cx| {
                 w.state.update(cx, |s, cx| {
                     s.prefs.task_scope_all = val;
                     s.save_prefs();
+                    s.ensure_ended(cx);
                     cx.notify();
                 })
             }))
@@ -565,9 +570,66 @@ fn screen_view(w: &mut Workspace, scr: Screen, window: &mut Window, cx: &mut Con
         .child(div().flex_none().px(px(16.)).pt(px(4.)).pb(px(8.)).text_size(px(30.)).font_weight(FontWeight::BOLD).child(scr.title()).child(probe("phone.screenTitle")))
         .when(scr == Screen::Panel(View::Tasks), |d| {
             d.child(div().flex_none().mx(px(14.)).mb(px(8.)).p(px(3.)).rounded(px(9.)).bg(k.panel).flex().child(seg("ph-all", "All Tasks", scope_all, true, cx)).child(seg("ph-this", "This Task", !scope_all, false, cx)))
+                .child(done_toggle(show_done, hidden, cx))
         })
         .child(div().flex_1().min_h_0().child(body))
         .into_any_element()
+}
+
+/// "Show done" on the Tasks screen: done and canceled tasks are hidden by default (thousands of them hung the phone);
+/// on, they load a page at a time (Load older done tasks).
+fn done_toggle(on: bool, hidden: usize, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let k = c(cx).clone();
+    let label = if on {
+        "Showing done and canceled tasks".to_string()
+    } else if hidden > 0 {
+        format!("{} done or canceled hidden", fmt_count(hidden))
+    } else {
+        "Done and canceled tasks hidden".to_string()
+    };
+    let knob = div().size(px(22.)).rounded_full().bg(white()).shadow(vec![BoxShadow { color: black().opacity(0.25), offset: point(px(0.), px(1.)), blur_radius: px(3.), spread_radius: px(0.), inset: false }]);
+    let track = div()
+        .flex_none()
+        .w(px(44.))
+        .h(px(26.))
+        .p(px(2.))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .bg(if on { k.accent } else { k.line })
+        .when(on, |d| d.justify_end())
+        .child(knob);
+    div()
+        .id("ph-show-done")
+        .flex_none()
+        .mx(px(14.))
+        .mb(px(8.))
+        .px(px(12.))
+        .py(px(8.))
+        .rounded(px(9.))
+        .bg(k.panel)
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .cursor_pointer()
+        .child(icon(if on { "eye" } else { "eye-off" }, 16., k.muted))
+        .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(14.)).text_color(k.text).child("Show done")).child(div().text_size(px(12.)).text_color(k.faint).child(label)))
+        .child(track)
+        .child(probe("phone.showDone"))
+        .on_click(cx.listener(move |w, _, _, cx| w.state.update(cx, |s, cx| s.set_show_done(!on, cx))))
+}
+
+/// 3559 -> "3,559"
+fn fmt_count(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn group(cx: &App) -> Div {

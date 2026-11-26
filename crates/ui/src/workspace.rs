@@ -959,14 +959,14 @@ impl Workspace {
                     w.state.update(cx, |s, cx| {
                         s.prefs.task_scope_all = !s.prefs.task_scope_all;
                         s.save_prefs();
+                        s.ensure_ended(cx);
                         cx.notify();
                     })
                 })))
-                .child(icon_btn("ended", if show_ended { "eye" } else { "eye-off" }, 15., cx).tooltip(tooltip(if show_ended { "hide finished tasks" } else { "show finished tasks" })).on_click(cx.listener(|w, _, _, cx| {
+                .child(icon_btn("ended", if show_ended { "eye" } else { "eye-off" }, 15., cx).tooltip(tooltip(if show_ended { "hide done and canceled tasks" } else { "show done and canceled tasks" })).child(probe("side.showDone")).on_click(cx.listener(|w, _, _, cx| {
                     w.state.update(cx, |s, cx| {
-                        s.prefs.show_ended = !s.prefs.show_ended;
-                        s.save_prefs();
-                        cx.notify();
+                        let on = !s.prefs.show_ended;
+                        s.set_show_done(on, cx);
                     })
                 })))
                 .when(!ended, |d| d.child(icon_btn("side-new", "plus", 16., cx).tooltip(tooltip("new task under the current one (⌘N)")).child(probe("side.new")).on_click(cx.listener(|w, _, window, cx| dialogs::open_new_task(w, None, window, cx)))));

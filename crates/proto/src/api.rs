@@ -17,8 +17,9 @@ fn s(v: &Value) -> String {
 fn opt_s(v: &Value) -> Option<String> {
     v.as_str().map(String::from)
 }
+// straight from the borrowed value (no clone of it first: a snapshot carries thousands of tasks)
 fn from<T: serde::de::DeserializeOwned>(v: &Value) -> Option<T> {
-    serde_json::from_value(v.clone()).ok()
+    T::deserialize(v).ok()
 }
 
 // ---- the task tree ------------------------------------------------------------------------------------------------
@@ -138,6 +139,11 @@ pub struct Snapshot {
     pub history: bool,
     /// unread notices by level
     pub notices: Unread,
+    /// `tasks` holds only the live tasks (not done or canceled), the pinned ones and their ancestors: the engine
+    /// answered a `tasks: "live"` connect; the terminal rest comes by rpc tasks {ended: true}
+    pub tasks_live: bool,
+    /// how many tasks the engine left out of `tasks` (tasks_live)
+    pub tasks_hidden: usize,
 }
 impl Snapshot {
     pub fn parse(m: &Value) -> Option<Snapshot> {
@@ -174,6 +180,8 @@ impl Snapshot {
             requests: m["requests"].as_array().map(|a| a.iter().filter_map(|t| from::<RequestRecord>(t)).collect()).unwrap_or_default(),
             history: m.get("turns").is_some_and(|t| t.is_array()),
             notices: from(&m["notices"]).unwrap_or_default(),
+            tasks_live: m["tasksScope"].as_str() == Some("live"),
+            tasks_hidden: i(&m["tasksHidden"]).max(0) as usize,
         })
     }
 }
